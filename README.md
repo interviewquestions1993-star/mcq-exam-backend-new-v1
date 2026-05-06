@@ -1,17 +1,19 @@
-# Hugging Face Inference Backend
+# 🎓 AI-Powered MCQ Exam Preparer
 
-A Python FastAPI backend for interacting with Hugging Face Inference API. Send text prompts and get AI-generated responses without hosting your own models.
+**Status:** ✅ Ready to Deploy | **Frontend + Backend Complete** | **Free Cloud Ready**
+
+A full-stack application for generating AI-powered multiple choice questions using Hugging Face models. Includes Angular Material frontend and FastAPI backend.
 
 ## Features
 
-- ✅ Text Generation using Hugging Face models
-- ✅ Text Summarization
-- ✅ Chat-style interactions
-- ✅ Error handling with automatic retries
-- ✅ Cold start handling (503 errors)
-- ✅ Rate limiting handling
-- ✅ CORS support for frontend integration
-- ✅ RESTful API with Swagger documentation
+- ✅ **AI-Powered MCQs**: Hugging Face (DeepSeek-V4-Flash) generates questions
+- ✅ **5 Questions per Quiz**: Customizable difficulty levels
+- ✅ **Instant Explanations**: AI-generated explanations for each answer
+- ✅ **Beautiful UI**: HackerRank-style Material Design
+- ✅ **Responsive Design**: Works on mobile, tablet, desktop
+- ✅ **Zero Database**: Session storage only (zero setup!)
+- ✅ **Deploy Free**: Render (backend) + Vercel (frontend)
+- ✅ **CORS Enabled**: Frontend-backend communication
 
 ## Quick Start
 

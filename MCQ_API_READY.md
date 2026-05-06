@@ -211,7 +211,7 @@ Can containerize this easily when ready
 
 **Current Setup** (.env):
 ```
-HF_TOKEN=YOUR_HF_TOKEN
+HF_TOKEN=<YOUR_HF_TOKEN>
 HF_MODEL=deepseek-ai/DeepSeek-V4-Flash
 API_PORT=8000
 API_HOST=0.0.0.0
