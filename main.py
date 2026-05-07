@@ -4,7 +4,7 @@ FastAPI backend for Hugging Face Inference API
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 from hf_inference import hf_client
 from config import API_HOST, API_PORT
 
@@ -84,7 +84,7 @@ class MCQQuestion(BaseModel):
     """Single MCQ question"""
     id: int
     question: str
-    options: list[str]  # A) Option 1, B) Option 2, etc.
+    options: List[str]  # A) Option 1, B) Option 2, etc.
     correct_answer: str  # "A", "B", "C", or "D"
     explanation: str
     difficulty: str  # "easy", "medium", "hard"
@@ -110,7 +110,7 @@ class MCQGenerationResponse(BaseModel):
     """Response model for MCQ generation"""
     topic: str
     num_questions: int
-    questions: list[MCQQuestion]
+    questions: List[MCQQuestion]
     status: str = "success"
 
 
