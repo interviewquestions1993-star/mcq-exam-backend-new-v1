@@ -48,7 +48,7 @@ print(response)  # ← Returns string directly
 from huggingface_hub import InferenceClient
 
 client = InferenceClient(
-    api_key="YOUR_HF_TOKEN"
+api_key="YOUR_HF_TOKEN"
 )
 
 response = client.chat_completion(
