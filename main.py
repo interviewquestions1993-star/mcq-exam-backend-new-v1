@@ -3,7 +3,7 @@ FastAPI backend for Hugging Face Inference API
 """
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel
 from typing import Optional
 from hf_inference import hf_client
 from config import API_HOST, API_PORT
@@ -33,8 +33,8 @@ class TextGenerationRequest(BaseModel):
     temperature: Optional[float] = 0.7
     top_p: Optional[float] = 0.9
     
-    model_config = ConfigDict(
-        json_schema_extra={
+    class Config:
+        json_schema_extra = {
             "example": {
                 "prompt": "Explain what a neural network is in two sentences.",
                 "max_new_tokens": 100,
@@ -42,7 +42,6 @@ class TextGenerationRequest(BaseModel):
                 "top_p": 0.9
             }
         }
-    )
 
 
 class TextGenerationResponse(BaseModel):
@@ -58,15 +57,14 @@ class SummarizationRequest(BaseModel):
     max_length: Optional[int] = 50
     min_length: Optional[int] = 20
     
-    model_config = ConfigDict(
-        json_schema_extra={
+    class Config:
+        json_schema_extra = {
             "example": {
                 "text": "Hugging Face is a company that develops tools for building machine learning applications...",
                 "max_length": 50,
                 "min_length": 20
             }
         }
-    )
 
 
 class SummarizationResponse(BaseModel):
@@ -98,15 +96,14 @@ class MCQGenerationRequest(BaseModel):
     num_questions: Optional[int] = 5
     difficulty: Optional[str] = None  # "easy", "medium", "hard", or None for mixed
     
-    model_config = ConfigDict(
-        json_schema_extra={
+    class Config:
+        json_schema_extra = {
             "example": {
                 "topic": "Angular",
                 "num_questions": 5,
                 "difficulty": None
             }
         }
-    )
 
 
 class MCQGenerationResponse(BaseModel):
