@@ -16,5 +16,5 @@ COPY . .
 # Expose port (Cloud Run assigns this automatically)
 EXPOSE 8000
 
-# Run the application
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Run the application using Render's PORT environment variable when available
+CMD ["bash", "-lc", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"]
