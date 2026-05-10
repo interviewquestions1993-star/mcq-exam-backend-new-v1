@@ -207,6 +207,8 @@ async def generate_mcq(request: MCQGenerationRequest) -> MCQGenerationResponse:
         
         prompt = f"""Generate {request.num_questions} multiple choice questions {difficulty_hint}about {request.topic}.
 
+Each time, produce a fresh, unique set of questions. Do not repeat questions from earlier generations or reuse the same wording.
+
 For each question, provide:
 1. A clear question
 2. Four options labeled A), B), C), D)
@@ -232,7 +234,8 @@ Generate only valid JSON, no other text."""
         response_text = hf_client.text_generation(
             prompt=prompt,
             max_new_tokens=2000,
-            temperature=0.7
+            temperature=0.9,
+            top_p=0.95
         )
         
         # Parse the JSON response
