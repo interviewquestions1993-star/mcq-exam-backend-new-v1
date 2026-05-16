@@ -1,10 +1,14 @@
-import os
 import json
+import os
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, Optional
 
+from dotenv import load_dotenv
 import firebase_admin
 from firebase_admin import credentials, firestore
+
+load_dotenv()
 
 FIREBASE_ENABLED = os.getenv("FIREBASE_ENABLED", "false").strip().lower() == "true"
 FIREBASE_PROJECT_ID = os.getenv("FIREBASE_PROJECT_ID", "").strip()
@@ -34,7 +38,11 @@ def _initialize_firestore() -> Optional[firestore.Client]:
             cred = credentials.Certificate(credentials_data)
             firebase_admin.initialize_app(cred, app_options or None)
         elif FIREBASE_SERVICE_ACCOUNT_PATH:
-            cred = credentials.Certificate(FIREBASE_SERVICE_ACCOUNT_PATH)
+            service_account_path = Path(FIREBASE_SERVICE_ACCOUNT_PATH)
+            if not service_account_path.is_absolute():
+                service_account_path = Path(__file__).resolve().parent / service_account_path
+
+            cred = credentials.Certificate(str(service_account_path))
             firebase_admin.initialize_app(cred, app_options or None)
         else:
             # Use application default credentials if available
