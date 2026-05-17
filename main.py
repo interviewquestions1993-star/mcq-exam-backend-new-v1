@@ -335,14 +335,22 @@ async def get_persisted_mcqs() -> List[PersistedMCQResponse]:
         results = []
         for doc in docs:
             data = doc.to_dict()
-            # Ensure questions exist and are properly formatted
-            questions_data = data.get("response", {}).get("questions", [])
+
+            # Support multiple persisted formats:
+            # - older entries may have questions under top-level 'questions'
+            # - some saves store the AI response under 'response' with nested 'questions'
+            if isinstance(data.get("questions"), list):
+                questions_data = data.get("questions", [])
+            else:
+                resp = data.get("response") or {}
+                questions_data = resp.get("questions", []) if isinstance(resp, dict) else []
+
             questions = [MCQQuestion(**q) if isinstance(q, dict) else q for q in questions_data]
-            
+
             result = PersistedMCQResponse(
                 id=doc.id,
                 topic=data.get("topic", ""),
-                num_questions=data.get("num_questions", 0),
+                num_questions=data.get("num_questions", len(questions)),
                 questions=questions,
                 created_at=data.get("created_at", ""),
                 status=data.get("status", "success")
