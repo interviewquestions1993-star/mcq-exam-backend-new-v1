@@ -4,7 +4,7 @@ FastAPI backend for Hugging Face Inference API
 from datetime import datetime
 import requests
 
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import FastAPI, HTTPException, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
@@ -379,6 +379,7 @@ Generate only valid JSON, no other text."""
 @app.post("/api/mcq/history", response_model=SaveHistoryResponse)
 async def save_mcq_history(
     request: MCQHistoryRecordRequest,
+    request_obj: Request,
     authorization: Optional[str] = Header(None),
     x_id_token: Optional[str] = Header(None, alias="X-ID-TOKEN"),
     id_token: Optional[str] = None
@@ -387,7 +388,16 @@ async def save_mcq_history(
     Save a completed quiz attempt to Firestore for the authenticated user.
     """
     try:
-        token_info = get_user_info_from_authorization(authorization, x_id_token, id_token)
+        # Prefer headers present on the Request object (safer behind proxies)
+        auth_header = request_obj.headers.get("authorization")
+        x_header = request_obj.headers.get("x-id-token")
+        token_info = None
+        try:
+            token_info = get_user_info_from_authorization(auth_header or authorization, x_header or x_id_token, id_token)
+        except HTTPException:
+            # Log headers for debugging when missing
+            print(f"[Auth Debug] request.headers: {dict(request_obj.headers)}")
+            raise
         user_id = token_info.get("sub")
         user_email = token_info.get("email", "")
 
@@ -422,6 +432,7 @@ async def save_mcq_history(
 
 @app.get("/api/mcq/history", response_model=List[ExamHistoryResponse])
 async def get_user_exam_history(
+    request_obj: Request,
     authorization: Optional[str] = Header(None),
     x_id_token: Optional[str] = Header(None, alias="X-ID-TOKEN"),
     id_token: Optional[str] = None
@@ -430,7 +441,13 @@ async def get_user_exam_history(
     Fetch exam history records for the authenticated user.
     """
     try:
-        token_info = get_user_info_from_authorization(authorization, x_id_token, id_token)
+        auth_header = request_obj.headers.get("authorization")
+        x_header = request_obj.headers.get("x-id-token")
+        try:
+            token_info = get_user_info_from_authorization(auth_header or authorization, x_header or x_id_token, id_token)
+        except HTTPException:
+            print(f"[Auth Debug] request.headers: {dict(request_obj.headers)}")
+            raise
         user_id = token_info.get("sub")
 
         client = get_firestore_client()
