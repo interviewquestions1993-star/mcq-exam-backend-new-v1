@@ -243,14 +243,29 @@ def verify_google_id_token(id_token: str) -> dict:
     return token_info
 
 
-def get_user_info_from_authorization(authorization: Optional[str]) -> dict:
-    if not authorization:
+def get_user_info_from_authorization(
+    authorization: Optional[str],
+    x_id_token: Optional[str] = None,
+    id_token_param: Optional[str] = None,
+) -> dict:
+    """Accept token from multiple locations: Authorization header, X-ID-TOKEN header, or id_token query param."""
+    token = None
+
+    # Prefer standard Authorization header
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization.split(" ", 1)[1].strip()
+
+    # Fallback to custom header
+    if not token and x_id_token:
+        token = x_id_token.strip()
+
+    # Fallback to query param
+    if not token and id_token_param:
+        token = id_token_param.strip()
+
+    if not token:
         raise HTTPException(status_code=401, detail="Authorization header missing")
 
-    if not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Invalid authorization header")
-
-    token = authorization.split(" ", 1)[1].strip()
     return verify_google_id_token(token)
 
 
@@ -364,13 +379,15 @@ Generate only valid JSON, no other text."""
 @app.post("/api/mcq/history", response_model=SaveHistoryResponse)
 async def save_mcq_history(
     request: MCQHistoryRecordRequest,
-    authorization: Optional[str] = Header(None)
+    authorization: Optional[str] = Header(None),
+    x_id_token: Optional[str] = Header(None, alias="X-ID-TOKEN"),
+    id_token: Optional[str] = None
 ) -> SaveHistoryResponse:
     """
     Save a completed quiz attempt to Firestore for the authenticated user.
     """
     try:
-        token_info = get_user_info_from_authorization(authorization)
+        token_info = get_user_info_from_authorization(authorization, x_id_token, id_token)
         user_id = token_info.get("sub")
         user_email = token_info.get("email", "")
 
@@ -404,12 +421,16 @@ async def save_mcq_history(
 
 
 @app.get("/api/mcq/history", response_model=List[ExamHistoryResponse])
-async def get_user_exam_history(authorization: Optional[str] = Header(None)) -> List[ExamHistoryResponse]:
+async def get_user_exam_history(
+    authorization: Optional[str] = Header(None),
+    x_id_token: Optional[str] = Header(None, alias="X-ID-TOKEN"),
+    id_token: Optional[str] = None
+) -> List[ExamHistoryResponse]:
     """
     Fetch exam history records for the authenticated user.
     """
     try:
-        token_info = get_user_info_from_authorization(authorization)
+        token_info = get_user_info_from_authorization(authorization, x_id_token, id_token)
         user_id = token_info.get("sub")
 
         client = get_firestore_client()
