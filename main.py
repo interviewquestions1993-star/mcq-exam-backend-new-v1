@@ -2,14 +2,15 @@
 FastAPI backend for Hugging Face Inference API
 """
 from datetime import datetime
+import requests
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from hf_inference import hf_client
 from firebase_client import save_ai_response, get_firestore_client
-from config import API_HOST, API_PORT, HF_MODEL
+from config import API_HOST, API_PORT, HF_MODEL, FIRESTORE_HISTORY_COLLECTION, GOOGLE_OAUTH_CLIENT_ID
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -91,6 +92,7 @@ class MCQQuestion(BaseModel):
     correct_answer: str  # "A", "B", "C", or "D"
     explanation: str
     difficulty: str  # "easy", "medium", "hard"
+    localId: Optional[str] = None
 
 
 class MCQGenerationRequest(BaseModel):
@@ -115,6 +117,37 @@ class MCQGenerationResponse(BaseModel):
     num_questions: int
     questions: List[MCQQuestion]
     status: str = "success"
+
+
+class MCQHistoryRecordRequest(BaseModel):
+    """Request model for saving a quiz history record"""
+    topic: str
+    num_questions: int
+    questions: List[MCQQuestion]
+    answers: Dict[str, str]
+    score: int
+    total: int
+    percentage: int
+    status: str = "completed"
+
+
+class ExamHistoryResponse(BaseModel):
+    """Response model for user exam history records"""
+    id: str
+    topic: str
+    num_questions: int
+    questions: List[MCQQuestion]
+    answers: Dict[str, str]
+    score: int
+    total: int
+    percentage: int
+    created_at: str
+    status: str = "completed"
+
+
+class SaveHistoryResponse(BaseModel):
+    status: str
+    id: Optional[str] = None
 
 
 # Routes
@@ -192,6 +225,33 @@ async def chat_endpoint(request: TextGenerationRequest) -> TextGenerationRespons
         TextGenerationResponse with response
     """
     return await generate_text(request)
+
+
+def verify_google_id_token(id_token: str) -> dict:
+    """Verify Google ID token and return token information."""
+    token_info_url = "https://oauth2.googleapis.com/tokeninfo"
+    try:
+        response = requests.get(token_info_url, params={"id_token": id_token}, timeout=10)
+        response.raise_for_status()
+        token_info = response.json()
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail=f"Invalid or expired Google token: {exc}")
+
+    if GOOGLE_OAUTH_CLIENT_ID and token_info.get("aud") != GOOGLE_OAUTH_CLIENT_ID:
+        raise HTTPException(status_code=401, detail="Invalid Google token audience")
+
+    return token_info
+
+
+def get_user_info_from_authorization(authorization: Optional[str]) -> dict:
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Authorization header missing")
+
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Invalid authorization header")
+
+    token = authorization.split(" ", 1)[1].strip()
+    return verify_google_id_token(token)
 
 
 @app.post("/api/mcq/generate", response_model=MCQGenerationResponse)
@@ -299,6 +359,94 @@ Generate only valid JSON, no other text."""
     
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"MCQ generation failed: {str(e)}")
+
+
+@app.post("/api/mcq/history", response_model=SaveHistoryResponse)
+async def save_mcq_history(
+    request: MCQHistoryRecordRequest,
+    authorization: Optional[str] = Header(None)
+) -> SaveHistoryResponse:
+    """
+    Save a completed quiz attempt to Firestore for the authenticated user.
+    """
+    try:
+        token_info = get_user_info_from_authorization(authorization)
+        user_id = token_info.get("sub")
+        user_email = token_info.get("email", "")
+
+        client = get_firestore_client()
+        if client is None:
+            raise HTTPException(
+                status_code=503,
+                detail="Firestore not enabled or unavailable"
+            )
+
+        record = {
+            "user_id": user_id,
+            "user_email": user_email,
+            "topic": request.topic,
+            "num_questions": request.num_questions,
+            "questions": [q.dict() for q in request.questions],
+            "answers": request.answers,
+            "score": request.score,
+            "total": request.total,
+            "percentage": request.percentage,
+            "status": request.status,
+            "created_at": datetime.utcnow().isoformat() + "Z"
+        }
+
+        doc_ref = client.collection(FIRESTORE_HISTORY_COLLECTION).add(record)
+        return SaveHistoryResponse(status="success", id=doc_ref[0].id)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save quiz history: {str(e)}")
+
+
+@app.get("/api/mcq/history", response_model=List[ExamHistoryResponse])
+async def get_user_exam_history(authorization: Optional[str] = Header(None)) -> List[ExamHistoryResponse]:
+    """
+    Fetch exam history records for the authenticated user.
+    """
+    try:
+        token_info = get_user_info_from_authorization(authorization)
+        user_id = token_info.get("sub")
+
+        client = get_firestore_client()
+        if client is None:
+            raise HTTPException(
+                status_code=503,
+                detail="Firestore not enabled or unavailable"
+            )
+
+        docs = client.collection(FIRESTORE_HISTORY_COLLECTION).where("user_id", "==", user_id).stream()
+
+        results = []
+        for doc in docs:
+            data = doc.to_dict()
+            questions_data = data.get("questions", [])
+            questions = [MCQQuestion(**q) if isinstance(q, dict) else q for q in questions_data]
+
+            result = ExamHistoryResponse(
+                id=doc.id,
+                topic=data.get("topic", ""),
+                num_questions=data.get("num_questions", len(questions)),
+                questions=questions,
+                answers=data.get("answers", {}),
+                score=data.get("score", 0),
+                total=data.get("total", len(questions)),
+                percentage=data.get("percentage", 0),
+                created_at=data.get("created_at", ""),
+                status=data.get("status", "completed")
+            )
+            results.append(result)
+
+        results.sort(key=lambda item: item.created_at or "", reverse=True)
+        return results
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch exam history: {str(e)}")
 
 
 class PersistedMCQResponse(BaseModel):
