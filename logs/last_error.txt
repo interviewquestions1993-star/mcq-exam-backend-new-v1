@@ -1,0 +1,24 @@
+Traceback (most recent call last):
+  File "D:\AI-Exam-preparer-v1\backendv1\main.py", line 139, in extract_json
+    return json.loads(json_text)
+           ~~~~~~~~~~^^^^^^^^^^^
+  File "C:\Users\91939\AppData\Local\Python\pythoncore-3.14-64\Lib\json\__init__.py", line 352, in loads
+    return _default_decoder.decode(s)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "C:\Users\91939\AppData\Local\Python\pythoncore-3.14-64\Lib\json\decoder.py", line 345, in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\91939\AppData\Local\Python\pythoncore-3.14-64\Lib\json\decoder.py", line 363, in raw_decode
+    raise JSONDecodeError("Expecting value", s, err.value) from None
+json.decoder.JSONDecodeError: Expecting value: line 8 column 48 (char 194)
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "D:\AI-Exam-preparer-v1\backendv1\main.py", line 242, in generate_mcqs
+    data = extract_json(content)
+  File "D:\AI-Exam-preparer-v1\backendv1\main.py", line 141, in extract_json
+    raise ValueError(
+        f"Invalid JSON payload from LLM. Raw output: {text!r}. Error: {exc}"
+    ) from exc
+ValueError: Invalid JSON payload from LLM. Raw output: '{\n  "topic": "Python",\n  "num_questions": 1,\n  "questions": [\n    {\n      "id": 1,\n      "question": "What does \'def\' keyword signify in Python?",\n      "options": ["A) It defines a function.", B) It declares an integer variable., C) It initializes a list item, D) None of the above"],\n      "correct_answer": "A",\n      "explanation": "\'def\' is used to define or declare functions/methods. A method can have any number of parameters.",\n      "difficulty": "Easy"\n    }\n  ],\n  "status": "success"\n}'. Error: Expecting value: line 8 column 48 (char 194)

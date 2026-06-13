@@ -1,24 +1,23 @@
 """
-Hugging Face Inference Providers API wrapper using OpenAI-compatible endpoint
-Uses the new unified endpoint: https://router.huggingface.co/v1
+Ollama local model wrapper using OpenAI-compatible API.
 """
 from openai import OpenAI
-from config import HF_TOKEN, HF_MODEL
+from backendv1.config import OLLAMA_BASE_URL, OLLAMA_API_KEY, OLLAMA_MODEL
 
 
-class HuggingFaceInference:
-    """Wrapper for Hugging Face Inference Providers (OpenAI-compatible API)"""
-    
+class OllamaInference:
+    """Wrapper for Ollama local model access via OpenAI-compatible endpoint."""
+
     def __init__(self):
         self.client = OpenAI(
-            base_url="https://router.huggingface.co/v1",
-            api_key=HF_TOKEN
+            base_url=f"{OLLAMA_BASE_URL.rstrip('/')}/v1",
+            api_key=OLLAMA_API_KEY
         )
-        self.model = HF_MODEL
-        print(f"DEBUG: Initialized Inference Client")
+        self.model = OLLAMA_MODEL
+        print(f"DEBUG: Initialized Ollama client")
         print(f"DEBUG: Model: {self.model}")
-        print(f"DEBUG: Token provided: {bool(HF_TOKEN)}")
-    
+        print(f"DEBUG: Base URL: {OLLAMA_BASE_URL}")
+
     def text_generation(
         self,
         prompt: str,
@@ -27,16 +26,7 @@ class HuggingFaceInference:
         top_p: float = 0.9
     ) -> str:
         """
-        Generate text using Hugging Face Inference Providers
-        
-        Args:
-            prompt: Input text prompt
-            max_new_tokens: Maximum number of tokens to generate
-            temperature: Controls randomness (0.0 = deterministic, 1.0+ = random)
-            top_p: Nucleus sampling parameter
-        
-        Returns:
-            Generated text
+        Generate text using a local Ollama model.
         """
         try:
             completion = self.client.chat.completions.create(
@@ -48,9 +38,9 @@ class HuggingFaceInference:
             )
             return completion.choices[0].message.content
         except Exception as e:
-            print(f"Error generating text: {e}")
+            print(f"Error generating text with Ollama: {e}")
             raise Exception(f"Failed to generate text: {str(e)}")
 
 
 # Create singleton instance
-hf_client = HuggingFaceInference()
+hf_client = OllamaInference()

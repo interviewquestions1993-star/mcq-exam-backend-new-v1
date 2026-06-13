@@ -1,565 +1,632 @@
-"""
-FastAPI backend for Hugging Face Inference API
-"""
-from datetime import datetime
-import requests
+﻿import json
+import random
+import os
+import logging
+import traceback
+import urllib.request
+import urllib.parse
+from typing import List, Optional
 
-from fastapi import FastAPI, HTTPException, Header, Request
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional, List, Dict, Any
-from hf_inference import hf_client
-from firebase_client import save_ai_response, get_firestore_client
-from config import API_HOST, API_PORT, HF_MODEL, FIRESTORE_HISTORY_COLLECTION, GOOGLE_OAUTH_CLIENT_ID
-
-# Initialize FastAPI app
-app = FastAPI(
-    title="Hugging Face Inference Backend",
-    description="Backend for text generation using Hugging Face Inference API",
-    version="1.0.0"
+from openai import OpenAI
+from .config import (
+    OLLAMA_BASE_URL,
+    OLLAMA_API_KEY,
+    OLLAMA_MODEL,
+    CHROMA_PERSIST_DIR,
+    CHROMA_COLLECTION_NAME,
 )
 
-# Add CORS middleware
+# Firebase client (optional)
+import sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+try:
+    from Backend.firebase_client import get_firestore_client, save_ai_response, FIREBASE_ENABLED, FIREBASE_COLLECTION
+    from firebase_admin import firestore as _fb_firestore
+except Exception as _e:
+    logging.warning("Firebase client unavailable: %s", _e)
+    get_firestore_client = None
+    save_ai_response = None
+    FIREBASE_ENABLED = False
+    FIREBASE_COLLECTION = 'ai_responses'
+    _fb_firestore = None
+
+
+# Custom exception for chapter not found
+class ChapterNotFound(Exception):
+    """Raised when a chapter's data file is not found on the remote source."""
+    pass
+
+
+app = FastAPI(title="NCERT Grade 8 Quiz Generator")
+
+# CORS: allow local frontend during development
+allowed_origins = [
+    "http://localhost:4200",
+    "http://127.0.0.1:4200",
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# ========================= CONFIG =========================
+EMBEDDING_MODEL = "nomic-embed-text"
+LLM_MODEL = OLLAMA_MODEL if ":" in OLLAMA_MODEL else f"{OLLAMA_MODEL}:latest"
+PERSIST_DIR = CHROMA_PERSIST_DIR
+COLLECTION_NAME = CHROMA_COLLECTION_NAME
+# =======================================================
 
-# Request/Response models
-class TextGenerationRequest(BaseModel):
-    """Request model for text generation"""
-    prompt: str
-    max_new_tokens: Optional[int] = 100
-    temperature: Optional[float] = 0.7
-    top_p: Optional[float] = 0.9
+# Globals to be initialized lazily on first use
+embeddings = None
+vectorstore = None
+client = None
+
+# Configure basic logging to file for debugging server-side errors
+LOG_DIR = os.path.join(os.path.dirname(__file__), "logs")
+os.makedirs(LOG_DIR, exist_ok=True)
+LOG_FILE = os.path.join(LOG_DIR, "backend.log")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    handlers=[logging.FileHandler(LOG_FILE), logging.StreamHandler()],
+)
+
+# NOTE: Removed startup_event to allow fast server startup.
+# Initialization happens lazily in ensure_initialized() on first use.
+
+
+def ensure_initialized():
+    """Lazy initialization of embeddings, vectorstore, and client.
     
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "prompt": "Explain what a neural network is in two sentences.",
-                "max_new_tokens": 100,
-                "temperature": 0.7,
-                "top_p": 0.9
-            }
-        }
-
-
-class TextGenerationResponse(BaseModel):
-    """Response model for text generation"""
-    prompt: str
-    generated_text: str
-    status: str = "success"
-
-
-class SummarizationRequest(BaseModel):
-    """Request model for text summarization"""
-    text: str
-    max_length: Optional[int] = 50
-    min_length: Optional[int] = 20
-    
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "text": "Hugging Face is a company that develops tools for building machine learning applications...",
-                "max_length": 50,
-                "min_length": 20
-            }
-        }
-
-
-class SummarizationResponse(BaseModel):
-    """Response model for text summarization"""
-    original_text: str
-    summary: str
-    status: str = "success"
-
-
-class HealthResponse(BaseModel):
-    """Health check response"""
-    status: str
-    message: str
-
-
-class MCQQuestion(BaseModel):
-    """Single MCQ question"""
-    id: int
-    question: str
-    options: List[str]  # A) Option 1, B) Option 2, etc.
-    correct_answer: str  # "A", "B", "C", or "D"
-    explanation: str
-    difficulty: str  # "easy", "medium", "hard"
-    localId: Optional[str] = None
-
-
-class MCQGenerationRequest(BaseModel):
-    """Request model for MCQ generation"""
-    topic: str
-    num_questions: Optional[int] = 5
-    difficulty: Optional[str] = None  # "easy", "medium", "hard", or None for mixed
-    
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "topic": "Angular",
-                "num_questions": 5,
-                "difficulty": None
-            }
-        }
-
-
-class MCQGenerationResponse(BaseModel):
-    """Response model for MCQ generation"""
-    topic: str
-    num_questions: int
-    questions: List[MCQQuestion]
-    status: str = "success"
-
-
-class MCQHistoryRecordRequest(BaseModel):
-    """Request model for saving a quiz history record"""
-    topic: str
-    num_questions: int
-    questions: List[MCQQuestion]
-    answers: Dict[str, str]
-    score: int
-    total: int
-    percentage: int
-    status: str = "completed"
-
-
-class ExamHistoryResponse(BaseModel):
-    """Response model for user exam history records"""
-    id: str
-    topic: str
-    num_questions: int
-    questions: List[MCQQuestion]
-    answers: Dict[str, str]
-    score: int
-    total: int
-    percentage: int
-    created_at: str
-    status: str = "completed"
-
-
-class SaveHistoryResponse(BaseModel):
-    status: str
-    id: Optional[str] = None
-
-
-# Routes
-@app.get("/health", response_model=HealthResponse)
-async def health_check():
-    """Health check endpoint"""
-    return HealthResponse(
-        status="healthy",
-        message="Hugging Face Inference Backend is running"
-    )
-
-
-@app.get("/", response_model=HealthResponse)
-async def root():
-    """Root endpoint"""
-    return HealthResponse(
-        status="healthy",
-        message="Hugging Face Inference Backend is running"
-    )
-
-
-@app.post("/generate", response_model=TextGenerationResponse)
-async def generate_text(request: TextGenerationRequest) -> TextGenerationResponse:
+    This initializes these expensive objects on first use (first endpoint call)
+    rather than at server startup to allow the server to start quickly.
+    Once initialized, objects are reused for all subsequent requests.
     """
-    Generate text using Hugging Face Inference API
-    
-    Args:
-        request: TextGenerationRequest with prompt and parameters
-    
-    Returns:
-        TextGenerationResponse with generated text
-    
-    Raises:
-        HTTPException: If generation fails
+    global embeddings, vectorstore, client
+    if embeddings is None or vectorstore is None or client is None:
+        logging.info("Lazy initialization: embeddings/vectorstore/client are missing — initializing now")
+        try:
+            # Import langchain modules here to avoid slow imports at server startup
+            from langchain_ollama import OllamaEmbeddings
+            from langchain_chroma import Chroma
+            
+            embeddings = OllamaEmbeddings(
+                model=EMBEDDING_MODEL,
+                base_url=OLLAMA_BASE_URL,
+                validate_model_on_init=False,
+            )
+            vectorstore = Chroma(
+                persist_directory=PERSIST_DIR,
+                embedding_function=embeddings,
+                collection_name=COLLECTION_NAME,
+            )
+            client = OpenAI(base_url=f"{OLLAMA_BASE_URL.rstrip('/')}/v1", api_key=OLLAMA_API_KEY)
+            logging.info("Lazy initialization complete")
+        except Exception:
+            tb = traceback.format_exc()
+            logging.error("Lazy initialization failed:\n%s", tb)
+            with open(os.path.join(LOG_DIR, "last_error.txt"), "w", encoding="utf-8") as fh:
+                fh.write(tb)
+            raise
+
+    if vectorstore is None:
+        message = "Vectorstore initialization returned None"
+        logging.error(message)
+        raise RuntimeError(message)
+
+
+class MCQRequest(BaseModel):
+    topic: str
+    num_questions: int = 5
+    difficulty: Optional[str] = None
+    source: Optional[str] = None
+
+
+class CBSEMCQRequest(BaseModel):
+    topic: Optional[str] = None
+    num_questions: int = 10
+    difficulty: Optional[str] = None
+
+
+RAW_CBSE_MCQS_BASE = "https://raw.githubusercontent.com/learnenglishandgrow93-web/cbse-mcq-bank/refs/heads/main/"
+_CBSE_MCQS_CACHE = {}
+
+
+def fetch_cbse_mcqs(chapter_name: Optional[str] = None):
+    """Fetch CBSE MCQs from GitHub raw. If chapter_name is provided, construct
+    the raw URL for that chapter file and fetch it. Caches per-URL results.
+    Raises ChapterNotFound if chapter-specific URL returns 404.
     """
+    global _CBSE_MCQS_CACHE
+    # Build target URL
+    if chapter_name:
+        # Accept either already-encoded or plain chapter names. Normalize by
+        # stripping and URL-encoding the chapter filename component.
+        name = chapter_name.strip()
+        # Do not further split on colons here; the caller provides the normalized chapter name
+        if "-" in name and "%20" not in name:
+            # if hyphen-separated, prefer last segment
+            parts = [p.strip() for p in name.split("-") if p.strip()]
+            if parts:
+                name = parts[-1]
+
+        encoded = urllib.parse.quote(name, safe='')
+        url = RAW_CBSE_MCQS_BASE + encoded
+        logging.info(f"Constructed chapter-specific URL: {url}")
+        is_chapter_specific = True
+    else:
+        # Fallback to a default filename previously used
+        url = RAW_CBSE_MCQS_BASE + "The%20Invisible%20Living%20World%3A%20Beyond%20Our%20Naked%20Eye"
+        logging.info(f"Using default fallback URL: {url}")
+        is_chapter_specific = False
+
+    if url in _CBSE_MCQS_CACHE:
+        return _CBSE_MCQS_CACHE[url]
+
     try:
-        generated_text = hf_client.text_generation(
-            prompt=request.prompt,
-            max_new_tokens=request.max_new_tokens,
-            temperature=request.temperature,
-            top_p=request.top_p
+        with urllib.request.urlopen(url, timeout=15) as response:
+            content = response.read().decode("utf-8")
+            
+            # Extract only the valid JSON array (from first [ to last ])
+            # This handles files with extra text before or after the JSON
+            first_bracket = content.find('[')
+            last_bracket = content.rfind(']')
+            if first_bracket != -1 and last_bracket != -1 and last_bracket > first_bracket:
+                content = content[first_bracket:last_bracket+1]
+            
+            # Some upstream files contain literal control characters (unescaped newlines,
+            # tabs, or carriage returns) inside JSON string values which makes
+            # `json.loads` fail. Sanitize the text by escaping control characters
+            # that appear while inside a JSON string.
+            def _sanitize_json_text(s: str) -> str:
+                out_chars = []
+                in_str = False
+                esc = False
+                for ch in s:
+                    if ch == '"' and not esc:
+                        in_str = not in_str
+                        out_chars.append(ch)
+                        esc = False
+                        continue
+                    if ch == '\\' and not esc:
+                        esc = True
+                        out_chars.append(ch)
+                        continue
+                    if esc:
+                        # previous was a backslash, this char is escaped
+                        out_chars.append(ch)
+                        esc = False
+                        continue
+                    if in_str and ch == '\n':
+                        out_chars.append('\\n')
+                        continue
+                    if in_str and ch == '\r':
+                        out_chars.append('\\r')
+                        continue
+                    if in_str and ch == '\t':
+                        out_chars.append('\\t')
+                        continue
+                    out_chars.append(ch)
+                return ''.join(out_chars)
+
+            sanitized = _sanitize_json_text(content)
+            data = json.loads(sanitized)
+    except urllib.error.HTTPError as exc:
+        # If chapter-specific URL returns 404, raise ChapterNotFound
+        if is_chapter_specific and exc.code == 404:
+            raise ChapterNotFound(f"Chapter data not yet available: {chapter_name}") from exc
+        raise RuntimeError(f"Failed to load CBSE MCQs from remote source ({url}): {exc}") from exc
+    except Exception as exc:
+        raise RuntimeError(f"Failed to load CBSE MCQs from remote source ({url}): {exc}") from exc
+
+    if not isinstance(data, list):
+        raise ValueError("CBSE MCQ source must be a JSON array")
+
+    _CBSE_MCQS_CACHE[url] = data
+    return data
+
+
+def convert_cbse_item(item: dict):
+    return {
+        "id": item.get("id"),
+        "question": item.get("question", ""),
+        "options": item.get("options", []),
+        "correct_answer": item.get("answer") or item.get("correct_answer") or "",
+        "explanation": item.get("explanation", ""),
+        "difficulty": str(item.get("difficulty", "")).capitalize() or "Medium",
+    }
+
+
+def extract_json(text: str):
+    import re
+    import json as json_module
+    
+    text = (text or "").strip()
+    if not text:
+        raise ValueError("LLM response body was empty; no JSON could be extracted")
+
+    # Remove markdown code fences
+    code_fence_pattern = r'```(?:json|python|javascript|yaml)?\s*\n?(.*?)\n?```'
+    match = re.search(code_fence_pattern, text, re.DOTALL)
+    if match:
+        text = match.group(1).strip()
+    
+    text = text.strip()
+    if text.startswith('```'):
+        text = text[3:]
+    if text.endswith('```'):
+        text = text[:-3]
+    
+    text = re.sub(r'^(json|python|javascript|yaml)\s*', '', text, flags=re.IGNORECASE).strip()
+    
+    # Find the first JSON structure
+    start_positions = [pos for pos in (text.find('{'), text.find('[')) if pos != -1]
+    if not start_positions:
+        raise ValueError(f"Unable to locate JSON in LLM response: {text!r}")
+
+    json_text = text[min(start_positions):]
+    
+    # Try standard JSON parsing first
+    try:
+        return json_module.loads(json_text)
+    except json_module.JSONDecodeError:
+        pass
+    
+    # Fix common LLM error: unquoted MCQ options like: B) text instead of "B) text"
+    # This regex handles: , B) text, C) text patterns
+    # We look for: comma + optional whitespace + letter + ) and add quotes around the option
+    
+    # Pattern explanation:
+    # ,(\s+)([A-Z]\))(\s+) means: comma, spaces, letter), spaces
+    # Replace with: ,"$2$3$quoted_option"
+    
+    def add_quotes_to_unquoted_options(s):
+        """Add quotes around unquoted MCQ options in arrays."""
+        # Find all positions where we have ", B)" pattern (comma, space, letter, paren)
+        # and the content after isn't already quoted
+        result = []
+        lines = s.split('\n')
+        for line in lines:
+            # Look for "options": [ ... ] lines
+            if '"options"' in line:
+                # Find the array content
+                match = re.search(r'"options"\s*:\s*\[(.*)\]', line)
+                if match:
+                    opts_content = match.group(1)
+                    # Split by comma, but preserve quoted strings
+                    # This is a simplification - just wrap unquoted items
+                    opts_content = re.sub(
+                        r',(\s*)([A-Z]\))',  # comma, optional space, letter, paren
+                        r', "\2',             # replace with comma, space, quote, letter, paren
+                        opts_content
+                    )
+                    # Now we need to close the quotes - find where each option ends
+                    # Option ends before next comma (outside quotes) or at ]
+                    opts_content = re.sub(
+                        r'("\w\)[^"]*?)(?=,|$)',  # quoted option content, lookahead for comma or end
+                        r'\1"',                    # close the quote
+                        opts_content
+                    )
+                    line = f'"options": [{opts_content}]'
+                result.append(line)
+            else:
+                result.append(line)
+        return '\n'.join(result)
+    
+    json_text = add_quotes_to_unquoted_options(json_text)
+    
+    try:
+        return json_module.loads(json_text)
+    except json_module.JSONDecodeError as exc:
+        raise ValueError(
+            f"Could not parse JSON from LLM response. Tried standard JSON, manual fix attempts. Raw: {text[:300]!r}. Error: {exc}"
+        ) from exc
+
+
+def get_retriever(query: str):
+    ensure_initialized()
+    if vectorstore is None:
+        raise RuntimeError("Vectorstore is not initialized")
+
+    if not hasattr(vectorstore, "as_retriever"):
+        raise RuntimeError("Chroma vectorstore has no as_retriever() method")
+
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 12})
+    if retriever is None:
+        raise RuntimeError("as_retriever() returned None")
+
+    if hasattr(retriever, "get_relevant_documents"):
+        docs = retriever.get_relevant_documents(query)
+    elif hasattr(retriever, "retrieve"):
+        docs = retriever.retrieve(query)
+    elif hasattr(retriever, "invoke"):
+        docs = retriever.invoke(query)
+    else:
+        raise RuntimeError("Retriever does not support get_relevant_documents, retrieve, or invoke")
+
+    return docs
+
+
+@app.post("/api/mcq/generate")
+def generate_mcqs(request: MCQRequest):
+    try:
+        query = f"NCERT Grade 8 {request.topic}" if request.topic else "NCERT Grade 8"
+        docs = get_retriever(query)
+        if not docs:
+            logging.warning("Retriever returned no documents for query: %s", query)
+            context = (
+                "No reference documents were found in the vector store. "
+                "Generate the MCQs using NCERT Grade 8 knowledge only."
+            )
+        else:
+            context = "\n\n".join([doc.page_content for doc in docs])
+
+        system_prompt = f"""You are an expert CBSE NCERT Grade 8 teacher with 15+ years of experience.
+Your task is to generate exactly {request.num_questions} fresh, high-quality MCQs for the topic '{request.topic}'.
+Use ONLY the provided context and NCERT-aligned concepts.
+
+Return a valid JSON object with the following structure:
+{{
+  "topic": "{request.topic}",
+  "num_questions": {request.num_questions},
+  "questions": [
+    {{
+      "id": 1,
+      "question": "...",
+      "options": ["A) ...", "B) ...", "C) ...", "D) ..."],
+      "correct_answer": "A",
+      "explanation": "...",
+      "difficulty": "Easy|Medium|Hard"
+    }}
+  ],
+  "status": "success"
+}}
+Only return valid JSON. Do not include any extra text outside the JSON object."""
+
+        if request.difficulty:
+            system_prompt += f"\nUse the requested difficulty level: {request.difficulty}."
+        if request.source:
+            system_prompt += f"\nUse information from this source if relevant: {request.source}."
+
+        response = client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"Context:\n\n{context}\n\nGenerate the JSON payload now."}
+            ],
+            temperature=0.82,
+            max_tokens=3500,
+            top_p=0.92
         )
 
-        save_ai_response("ai_responses", {
-            "endpoint": "/generate",
-            "prompt": request.prompt,
-            "model": HF_MODEL,
-            "request": request.dict(),
-            "response": {"generated_text": generated_text},
-            "status": "success"
-        })
-        
-        return TextGenerationResponse(
-            prompt=request.prompt,
-            generated_text=generated_text,
-            status="success"
-        )
-    
+        choice = response.choices[0]
+        content = None
+
+        # OpenAI wrapper may expose the assistant text in different fields
+        if hasattr(choice, 'message') and getattr(choice, 'message', None) is not None:
+            content = getattr(choice.message, 'content', None)
+        if not content and hasattr(choice, 'text'):
+            content = getattr(choice, 'text', None)
+        if not content and hasattr(choice, 'content'):
+            content = getattr(choice, 'content', None)
+
+        logging.info('LLM raw choice content: %r', content)
+        if not content:
+            raw = None
+            try:
+                raw = choice.to_dict() if hasattr(choice, 'to_dict') else repr(choice)
+            except Exception:
+                raw = repr(choice)
+            raise RuntimeError(f"LLM response content was empty. choice={raw}")
+
+        data = extract_json(content)
+
+        return data
+
+    except HTTPException:
+        raise
     except Exception as e:
+        tb = traceback.format_exc()
+        logging.error("Exception in /api/mcq/generate:\n%s", tb)
+        with open(os.path.join(LOG_DIR, "last_error.txt"), "w", encoding="utf-8") as fh:
+            fh.write(tb)
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/mcq/cbse")
+def get_cbse_mcqs(request: CBSEMCQRequest):
+    import re
 
+    raw_query = (request.topic or "").strip()
+    query = raw_query.lower()
+    difficulty = (request.difficulty or "").strip().lower()
 
+    # Attempt to fetch chapter-specific MCQs based on the topic
+    entries = None
+    chapter_not_found = False
+    if raw_query:
+        chapter_name = None
+        if ":" in raw_query:
+            # Keep everything after the first colon; chapter titles may contain colons
+            chapter_name = raw_query.split(":", 1)[1].strip()
+        elif "-" in raw_query:
+            parts = [p.strip() for p in raw_query.split("-") if p.strip()]
+            if parts:
+                chapter_name = parts[-1]
+        else:
+            # If the topic looks like a chapter title (multiple words), use it
+            if len(raw_query.split()) > 2:
+                chapter_name = raw_query
 
-@app.post("/chat", response_model=TextGenerationResponse)
-async def chat_endpoint(request: TextGenerationRequest) -> TextGenerationResponse:
-    """
-    Chat endpoint (alias for generate)
-    
-    Args:
-        request: TextGenerationRequest with prompt
-    
-    Returns:
-        TextGenerationResponse with response
-    """
-    return await generate_text(request)
+        if chapter_name:
+            try:
+                entries = fetch_cbse_mcqs(chapter_name=chapter_name)
+            except ChapterNotFound as exc:
+                # Chapter data not yet available
+                logging.warning("Chapter not found: %s", exc)
+                chapter_not_found = True
+            except Exception as exc:
+                logging.warning("Failed to fetch CBSE MCQs for chapter '%s': %s", chapter_name, exc)
 
-
-def verify_google_id_token(id_token: str) -> dict:
-    """Verify Google ID token and return token information."""
-    token_info_url = "https://oauth2.googleapis.com/tokeninfo"
-    try:
-        response = requests.get(token_info_url, params={"id_token": id_token}, timeout=10)
-        response.raise_for_status()
-        token_info = response.json()
-    except Exception as exc:
-        raise HTTPException(status_code=401, detail=f"Invalid or expired Google token: {exc}")
-
-    if GOOGLE_OAUTH_CLIENT_ID and token_info.get("aud") != GOOGLE_OAUTH_CLIENT_ID:
-        raise HTTPException(status_code=401, detail="Invalid Google token audience")
-
-    return token_info
-
-
-def get_user_info_from_authorization(
-    authorization: Optional[str],
-    x_id_token: Optional[str] = None,
-    id_token_param: Optional[str] = None,
-) -> dict:
-    """Accept token from multiple locations: Authorization header, X-ID-TOKEN header, or id_token query param."""
-    token = None
-
-    # Prefer standard Authorization header
-    if authorization and authorization.startswith("Bearer "):
-        token = authorization.split(" ", 1)[1].strip()
-
-    # Fallback to custom header
-    if not token and x_id_token:
-        token = x_id_token.strip()
-
-    # Fallback to query param
-    if not token and id_token_param:
-        token = id_token_param.strip()
-
-    if not token:
-        raise HTTPException(status_code=401, detail="Authorization header missing")
-
-    return verify_google_id_token(token)
-
-
-@app.post("/api/mcq/generate", response_model=MCQGenerationResponse)
-async def generate_mcq(request: MCQGenerationRequest) -> MCQGenerationResponse:
-    """
-    Generate MCQ questions for a given topic
-    
-    Args:
-        request: MCQGenerationRequest with topic and number of questions
-    
-    Returns:
-        MCQGenerationResponse with generated questions
-    
-    Raises:
-        HTTPException: If generation fails
-    """
-    try:
-        import json
-        import re
-        
-        # Build the prompt for MCQ generation
-        difficulty_hint = ""
-        if request.difficulty:
-            difficulty_hint = f"with {request.difficulty} difficulty. "
-        
-        prompt = f"""Generate {request.num_questions} multiple choice questions {difficulty_hint}about {request.topic}.
-
-Each time, produce a fresh, unique set of questions. Do not repeat questions from earlier generations or reuse the same wording.
-
-For each question, provide:
-1. A clear question
-2. Four options labeled A), B), C), D)
-3. The correct answer (single letter: A, B, C, or D)
-4. A brief explanation
-5. Difficulty level (easy/medium/hard)
-
-Format your response as a JSON array like this:
-[
-  {{
-    "id": 1,
-    "question": "What is...",
-    "options": ["A) Option 1", "B) Option 2", "C) Option 3", "D) Option 4"],
-    "correct_answer": "B",
-    "explanation": "Because...",
-    "difficulty": "medium"
-  }}
-]
-
-Generate only valid JSON, no other text."""
-
-        # Generate using AI
-        response_text = hf_client.text_generation(
-            prompt=prompt,
-            max_new_tokens=2000,
-            temperature=0.9,
-            top_p=0.95
-        )
-        
-        # Parse the JSON response
-        try:
-            # Find JSON array in response
-            json_match = re.search(r'\[\s*\{.*\}\s*\]', response_text, re.DOTALL)
-            if not json_match:
-                raise ValueError("No valid JSON array found in response")
-            
-            json_str = json_match.group(0)
-            questions_data = json.loads(json_str)
-            
-            # Validate and convert to MCQQuestion objects
-            questions = []
-            for i, q in enumerate(questions_data[:request.num_questions], 1):
-                question = MCQQuestion(
-                    id=i,
-                    question=q.get("question", ""),
-                    options=q.get("options", []),
-                    correct_answer=q.get("correct_answer", "A"),
-                    explanation=q.get("explanation", ""),
-                    difficulty=q.get("difficulty", "medium")
-                )
-                questions.append(question)
-            
-            save_ai_response("mcq_responses", {
-                "endpoint": "/api/mcq/generate",
-                "request": request.dict(),
-                "response_text": response_text,
-                "topic": request.topic,
-                "num_questions": len(questions),
-                "difficulty": request.difficulty,
-                "questions": [q.dict() for q in questions],
-                "status": "success"
-            })
-
-            return MCQGenerationResponse(
-                topic=request.topic,
-                num_questions=len(questions),
-                questions=questions,
-                status="success"
-            )
-        
-        except (json.JSONDecodeError, ValueError) as e:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to parse MCQ response: {str(e)}"
-            )
-    
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"MCQ generation failed: {str(e)}")
-
-
-@app.post("/api/mcq/history", response_model=SaveHistoryResponse)
-async def save_mcq_history(
-    request: MCQHistoryRecordRequest,
-    request_obj: Request,
-    authorization: Optional[str] = Header(None),
-    x_id_token: Optional[str] = Header(None, alias="X-ID-TOKEN"),
-    id_token: Optional[str] = None
-) -> SaveHistoryResponse:
-    """
-    Save a completed quiz attempt to Firestore for the authenticated user.
-    """
-    try:
-        # Prefer headers present on the Request object (safer behind proxies)
-        auth_header = request_obj.headers.get("authorization")
-        x_header = request_obj.headers.get("x-id-token")
-        token_info = None
-        try:
-            token_info = get_user_info_from_authorization(auth_header or authorization, x_header or x_id_token, id_token)
-        except HTTPException:
-            # Log headers for debugging when missing
-            print(f"[Auth Debug] request.headers: {dict(request_obj.headers)}")
-            raise
-        user_id = token_info.get("sub")
-        user_email = token_info.get("email", "")
-
-        client = get_firestore_client()
-        if client is None:
-            raise HTTPException(
-                status_code=503,
-                detail="Firestore not enabled or unavailable"
-            )
-
-        record = {
-            "user_id": user_id,
-            "user_email": user_email,
-            "topic": request.topic,
-            "num_questions": request.num_questions,
-            "questions": [q.dict() for q in request.questions],
-            "answers": request.answers,
-            "score": request.score,
-            "total": request.total,
-            "percentage": request.percentage,
-            "status": request.status,
-            "created_at": datetime.utcnow().isoformat() + "Z"
+    # If chapter was not found, return a message to the user
+    if chapter_not_found:
+        return {
+            "topic": request.topic or "CBSE",
+            "num_questions": 0,
+            "questions": [],
+            "status": "chapter_not_available",
+            "message": f"Chapter '{chapter_name}' is not yet available. Please check back soon!",
         }
 
-        doc_ref = client.collection(FIRESTORE_HISTORY_COLLECTION).add(record)
-        return SaveHistoryResponse(status="success", id=doc_ref[0].id)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to save quiz history: {str(e)}")
-
-
-@app.get("/api/mcq/history", response_model=List[ExamHistoryResponse])
-async def get_user_exam_history(
-    request_obj: Request,
-    authorization: Optional[str] = Header(None),
-    x_id_token: Optional[str] = Header(None, alias="X-ID-TOKEN"),
-    id_token: Optional[str] = None
-) -> List[ExamHistoryResponse]:
-    """
-    Fetch exam history records for the authenticated user.
-    """
-    try:
-        auth_header = request_obj.headers.get("authorization")
-        x_header = request_obj.headers.get("x-id-token")
+    # Fallback to default source if chapter-specific fetch failed or was not attempted
+    if entries is None:
         try:
-            token_info = get_user_info_from_authorization(auth_header or authorization, x_header or x_id_token, id_token)
-        except HTTPException:
-            print(f"[Auth Debug] request.headers: {dict(request_obj.headers)}")
-            raise
-        user_id = token_info.get("sub")
+            entries = fetch_cbse_mcqs()
+        except Exception as exc:
+            logging.error("CBSE MCQ fetch failed: %s", exc)
+            raise HTTPException(status_code=500, detail=str(exc))
 
-        client = get_firestore_client()
-        if client is None:
-            raise HTTPException(
-                status_code=503,
-                detail="Firestore not enabled or unavailable"
-            )
+    # Build a set of candidate query variants to improve matching for verbose
+    # topics like "CBSE Class 8 science: The Invisible Living World: Beyond Our Naked Eye"
+    queries = set()
+    queries.add(query)
 
-        docs = client.collection(FIRESTORE_HISTORY_COLLECTION).where("user_id", "==", user_id).stream()
+    # If the topic contains colons (:) or hyphens, add the last segment as a focused query
+    if ":" in raw_query:
+        for seg in raw_query.split(":"):
+            s = seg.strip().lower()
+            if s:
+                queries.add(s)
+    if "-" in raw_query:
+        for seg in raw_query.split("-"):
+            s = seg.strip().lower()
+            if s:
+                queries.add(s)
 
-        results = []
-        for doc in docs:
-            data = doc.to_dict()
-            questions_data = data.get("questions", [])
-            questions = [MCQQuestion(**q) if isinstance(q, dict) else q for q in questions_data]
+    # Strip common prefixes like 'cbse' and 'class <num>' to get the core topic
+    q_clean = re.sub(r"\bcbse\b", "", query)
+    q_clean = re.sub(r"\bclass\s*\d+\b", "", q_clean)
+    q_clean = re.sub(r"[^a-z0-9\s]", " ", q_clean)
+    q_clean = re.sub(r"\s+", " ", q_clean).strip()
+    if q_clean:
+        queries.add(q_clean)
 
-            result = ExamHistoryResponse(
-                id=doc.id,
-                topic=data.get("topic", ""),
-                num_questions=data.get("num_questions", len(questions)),
-                questions=questions,
-                answers=data.get("answers", {}),
-                score=data.get("score", 0),
-                total=data.get("total", len(questions)),
-                percentage=data.get("percentage", 0),
-                created_at=data.get("created_at", ""),
-                status=data.get("status", "completed")
-            )
-            results.append(result)
+    # Also add single-word tokens from the cleaned query as loose matches (avoid very short tokens)
+    for token in q_clean.split():
+        if len(token) > 3:
+            queries.add(token)
 
-        results.sort(key=lambda item: item.created_at or "", reverse=True)
-        return results
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch exam history: {str(e)}")
+    filtered = []
+    for item in entries:
+        subject = str(item.get("subject", "")).lower()
+        chapter = str(item.get("chapter", "")).lower()
+        question_text = str(item.get("question", "")).lower()
+        item_difficulty = str(item.get("difficulty", "")).lower()
+
+        # Check if any candidate query variant appears in any of the searchable fields
+        matched = False
+        for q in queries:
+            if not q:
+                continue
+            if q in subject or q in chapter or q in question_text:
+                matched = True
+                break
+
+        if query and not matched:
+            # no candidate matched this item
+            continue
+        if difficulty and difficulty != item_difficulty:
+            continue
+        filtered.append(item)
+
+    # If still nothing found but a topic was provided, try a relaxed filter: check whether
+    # all non-trivial words from the cleaned query appear somewhere in the item fields.
+    if not filtered and raw_query:
+        tokens = [t for t in q_clean.split() if len(t) > 3]
+        if tokens:
+            for item in entries:
+                subject = str(item.get("subject", "")).lower()
+                chapter = str(item.get("chapter", "")).lower()
+                question_text = str(item.get("question", "")).lower()
+                hay = " ".join([subject, chapter, question_text])
+                if all(tok in hay for tok in tokens):
+                    filtered.append(item)
+
+    if not filtered and request.topic:
+        raise HTTPException(status_code=404, detail="No matching CBSE MCQs were found for this topic.")
+
+    # If no items matched and no topic was provided, use the full entries pool
+    if not filtered:
+        pool = entries.copy()
+    else:
+        pool = filtered
+
+    # Randomize selection so each call returns a different subset
+    count = max(1, min(request.num_questions, 50))
+    random.shuffle(pool)
+    selected = pool[:count]
+    questions = [convert_cbse_item(item) for item in selected]
+
+    return {
+        "topic": request.topic or "CBSE",
+        "num_questions": len(questions),
+        "questions": questions,
+        "status": "success",
+    }
 
 
-class PersistedMCQResponse(BaseModel):
-    """Response model for fetching persisted MCQs"""
-    id: str
-    topic: str
-    num_questions: int
-    questions: List[MCQQuestion]
-    created_at: str
-    status: str
-
-
-@app.get("/api/mcq/persisted", response_model=List[PersistedMCQResponse])
-async def get_persisted_mcqs() -> List[PersistedMCQResponse]:
-    """
-    Fetch all persisted MCQ responses from Firestore
-    
-    Returns:
-        List of persisted MCQ records
-    
-    Raises:
-        HTTPException: If retrieval fails
-    """
+@app.post("/api/mcq/history")
+def save_mcq_history(record: dict):
+    # Persist quiz attempt to Firebase if configured, otherwise return success
     try:
-        client = get_firestore_client()
-        if client is None:
-            raise HTTPException(
-                status_code=503,
-                detail="Firestore not enabled or unavailable"
-            )
-        
-        docs = client.collection("mcq_responses").stream()
-        
-        results = []
-        for doc in docs:
-            data = doc.to_dict()
-
-            # Support multiple persisted formats:
-            # - older entries may have questions under top-level 'questions'
-            # - some saves store the AI response under 'response' with nested 'questions'
-            if isinstance(data.get("questions"), list):
-                questions_data = data.get("questions", [])
-            else:
-                resp = data.get("response") or {}
-                questions_data = resp.get("questions", []) if isinstance(resp, dict) else []
-
-            questions = [MCQQuestion(**q) if isinstance(q, dict) else q for q in questions_data]
-
-            result = PersistedMCQResponse(
-                id=doc.id,
-                topic=data.get("topic", ""),
-                num_questions=data.get("num_questions", len(questions)),
-                questions=questions,
-                created_at=data.get("created_at", ""),
-                status=data.get("status", "success")
-            )
-            results.append(result)
-        
-        return results
-    
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to fetch persisted MCQs: {str(e)}"
-        )
+        if FIREBASE_ENABLED and save_ai_response is not None:
+            save_ai_response(FIREBASE_COLLECTION, record)
+            return {"status": "success", "message": "History saved to Firebase.", "record": record}
+        else:
+            # Not configured: respond success but indicate local-only
+            logging.info("Firebase not enabled — history not persisted remotely")
+            return {"status": "success", "message": "History received (not persisted - Firebase disabled).", "record": record}
+    except Exception as exc:
+        logging.error("Failed to save history: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
-# Error handlers
-@app.exception_handler(Exception)
-async def general_exception_handler(request, exc):
-    """Global exception handler"""
-    return HTTPException(status_code=500, detail="Internal server error")
+@app.get("/api/mcq/history")
+def list_mcq_history(limit: int = 50):
+    # Return persisted quiz attempts (most recent first)
+    if not FIREBASE_ENABLED or get_firestore_client is None:
+        return []
+    client = get_firestore_client()
+    if client is None:
+        return []
+    try:
+        coll = client.collection(FIREBASE_COLLECTION)
+        if _fb_firestore:
+            docs = coll.order_by('created_at', direction=_fb_firestore.Query.DESCENDING).limit(limit).stream()
+        else:
+            docs = coll.order_by('created_at', direction='DESCENDING').limit(limit).stream()
+        items = []
+        for d in docs:
+            data = d.to_dict()
+            data['id'] = d.id
+            items.append(data)
+        return items
+    except Exception as exc:
+        logging.error("Failed to list persisted mcqs: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/health")
+def health():
+    return {"status": "healthy", "message": "Ollama backend is ready"}
 
 
 if __name__ == "__main__":
-    import uvicorn
-    print(f"Starting server on {API_HOST}:{API_PORT}")
-    uvicorn.run(app, host=API_HOST, port=API_PORT)
+    print(f"🚀 Starting NCERT Quiz Generator with model: {LLM_MODEL}")
+    uvicorn.run(app, host="0.0.0.0", port=8000)
