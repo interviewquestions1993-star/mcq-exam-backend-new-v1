@@ -42,10 +42,11 @@ class ChapterNotFound(Exception):
 
 app = FastAPI(title="NCERT Grade 8 Quiz Generator")
 
-# CORS: allow local frontend during development
+# CORS: allow local frontend during development plus GitHub Pages deployment
 allowed_origins = [
     "http://localhost:4200",
     "http://127.0.0.1:4200",
+    "https://interviewquestions1993-star.github.io",
 ]
 app.add_middleware(
     CORSMiddleware,
