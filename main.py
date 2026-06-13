@@ -11,7 +11,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from openai import OpenAI
-from .config import (
+from config import (
     OLLAMA_BASE_URL,
     OLLAMA_API_KEY,
     OLLAMA_MODEL,
