@@ -7,7 +7,7 @@ import urllib.request
 import urllib.parse
 from typing import List, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from openai import OpenAI
@@ -17,6 +17,8 @@ from config import (
     OLLAMA_MODEL,
     CHROMA_PERSIST_DIR,
     CHROMA_COLLECTION_NAME,
+    FIRESTORE_HISTORY_COLLECTION,
+    GOOGLE_OAUTH_CLIENT_ID,
 )
 
 # Firebase client (optional)
@@ -32,6 +34,14 @@ except Exception as _e:
     FIREBASE_ENABLED = False
     FIREBASE_COLLECTION = 'ai_responses'
     _fb_firestore = None
+
+try:
+    from google.oauth2 import id_token
+    from google.auth.transport import requests as google_requests
+except ImportError:
+    id_token = None
+    google_requests = None
+    logging.warning('google-auth library unavailable: user token verification disabled')
 
 
 # Custom exception for chapter not found
@@ -133,6 +143,20 @@ class CBSEMCQRequest(BaseModel):
     topic: Optional[str] = None
     num_questions: int = 10
     difficulty: Optional[str] = None
+
+
+class MCQHistoryRecord(BaseModel):
+    topic: str
+    num_questions: int
+    questions: list[dict]
+    answers: dict
+    score: int
+    total: int
+    percentage: int
+    status: str
+    user_id: Optional[str] = None
+    user_email: Optional[str] = None
+    user_name: Optional[str] = None
 
 
 RAW_CBSE_MCQS_BASE = "https://raw.githubusercontent.com/learnenglishandgrow93-web/cbse-mcq-bank/refs/heads/main/"
@@ -241,6 +265,37 @@ def convert_cbse_item(item: dict):
         "correct_answer": item.get("answer") or item.get("correct_answer") or "",
         "explanation": item.get("explanation", ""),
         "difficulty": str(item.get("difficulty", "")).capitalize() or "Medium",
+    }
+
+
+def verify_google_token(authorization: str | None = Header(None, alias="Authorization")):
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Authorization header must use Bearer scheme")
+
+    token = authorization.split(" ", 1)[1].strip()
+    if not token:
+        raise HTTPException(status_code=401, detail="Authorization token missing")
+
+    if id_token is None or google_requests is None:
+        raise HTTPException(status_code=500, detail="Server auth helper unavailable")
+
+    try:
+        request = google_requests.Request()
+        claims = id_token.verify_oauth2_token(token, request, GOOGLE_OAUTH_CLIENT_ID or None)
+    except Exception as exc:
+        logging.warning('Google token verification failed: %s', exc)
+        raise HTTPException(status_code=401, detail="Invalid authentication token") from exc
+
+    if not claims.get('sub'):
+        raise HTTPException(status_code=401, detail="Invalid token payload")
+
+    return {
+        'user_id': claims.get('sub'),
+        'user_email': claims.get('email'),
+        'user_name': claims.get('name') or claims.get('email') or 'Unknown'
     }
 
 
@@ -569,7 +624,10 @@ def get_cbse_mcqs(request: CBSEMCQRequest):
         pool = filtered
 
     # Randomize selection so each call returns a different subset
-    count = max(1, min(request.num_questions, 50))
+    if request.num_questions < 0:
+        count = len(pool)
+    else:
+        count = max(1, min(request.num_questions, 50))
     random.shuffle(pool)
     selected = pool[:count]
     questions = [convert_cbse_item(item) for item in selected]
@@ -583,35 +641,40 @@ def get_cbse_mcqs(request: CBSEMCQRequest):
 
 
 @app.post("/api/mcq/history")
-def save_mcq_history(record: dict):
+def save_mcq_history(record: MCQHistoryRecord, current_user: dict | None = Depends(verify_google_token)):
+    if current_user:
+        record.user_id = current_user.get('user_id')
+        record.user_email = current_user.get('user_email')
+        record.user_name = current_user.get('user_name')
+
     # Persist quiz attempt to Firebase if configured, otherwise return success
     try:
+        collection_name = FIRESTORE_HISTORY_COLLECTION or FIREBASE_COLLECTION
         if FIREBASE_ENABLED and save_ai_response is not None:
-            save_ai_response(FIREBASE_COLLECTION, record)
-            return {"status": "success", "message": "History saved to Firebase.", "record": record}
+            save_ai_response(collection_name, record.dict())
+            return {"status": "success", "message": "History saved to Firebase.", "record": record.dict()}
         else:
             # Not configured: respond success but indicate local-only
             logging.info("Firebase not enabled — history not persisted remotely")
-            return {"status": "success", "message": "History received (not persisted - Firebase disabled).", "record": record}
+            return {"status": "success", "message": "History received (not persisted - Firebase disabled).", "record": record.dict()}
     except Exception as exc:
         logging.error("Failed to save history: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))
 
 
 @app.get("/api/mcq/history")
-def list_mcq_history(limit: int = 50):
-    # Return persisted quiz attempts (most recent first)
+def list_mcq_history(limit: int = 50, current_user: dict = Depends(verify_google_token)):
+    # Return persisted quiz attempts for the authenticated user, most recent first
     if not FIREBASE_ENABLED or get_firestore_client is None:
         return []
     client = get_firestore_client()
     if client is None:
         return []
     try:
-        coll = client.collection(FIREBASE_COLLECTION)
-        if _fb_firestore:
-            docs = coll.order_by('created_at', direction=_fb_firestore.Query.DESCENDING).limit(limit).stream()
-        else:
-            docs = coll.order_by('created_at', direction='DESCENDING').limit(limit).stream()
+        coll = client.collection(FIRESTORE_HISTORY_COLLECTION or FIREBASE_COLLECTION)
+        query = coll.order_by('created_at', direction=_fb_firestore.Query.DESCENDING).limit(limit)
+        query = query.where('user_id', '==', current_user['user_id'])
+        docs = query.stream()
         items = []
         for d in docs:
             data = d.to_dict()
