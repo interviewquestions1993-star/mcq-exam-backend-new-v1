@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 from datetime import datetime
 from pathlib import Path
@@ -52,12 +53,15 @@ def _initialize_firestore() -> Optional[firestore.Client]:
         _firestore_client = firestore.client()
         return _firestore_client
     except Exception as exc:
-        print(f"[Firebase] Failed to initialize Firestore: {exc}")
+        logging.error(f"[Firebase] Failed to initialize Firestore: %s", exc)
         return None
 
 
 def get_firestore_client() -> Optional[firestore.Client]:
-    return _firestore_client or _initialize_firestore()
+    client = _firestore_client or _initialize_firestore()
+    if FIREBASE_ENABLED and client is None:
+        logging.error("[Firebase] FIREBASE_ENABLED=true but Firestore client could not be initialized")
+    return client
 
 
 def save_ai_response(collection_name: str, payload: Dict[str, Any]) -> None:
@@ -66,8 +70,8 @@ def save_ai_response(collection_name: str, payload: Dict[str, Any]) -> None:
 
     client = get_firestore_client()
     if client is None:
-        print("[Firebase] Firestore client unavailable, skipping save")
-        return
+        logging.error("[Firebase] Firestore client unavailable while attempting to save response")
+        raise RuntimeError("Firestore client unavailable")
 
     try:
         record = {
@@ -76,4 +80,5 @@ def save_ai_response(collection_name: str, payload: Dict[str, Any]) -> None:
         }
         client.collection(collection_name or FIREBASE_COLLECTION).add(record)
     except Exception as exc:
-        print(f"[Firebase] Failed to save AI response: {exc}")
+        logging.error(f"[Firebase] Failed to save AI response: %s", exc)
+        raise

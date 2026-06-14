@@ -22,18 +22,20 @@ from config import (
 )
 
 # Firebase client (optional)
-import sys
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 try:
-    from Backend.firebase_client import get_firestore_client, save_ai_response, FIREBASE_ENABLED, FIREBASE_COLLECTION
+    from .firebase_client import get_firestore_client, save_ai_response, FIREBASE_ENABLED, FIREBASE_COLLECTION
     from firebase_admin import firestore as _fb_firestore
-except Exception as _e:
-    logging.warning("Firebase client unavailable: %s", _e)
-    get_firestore_client = None
-    save_ai_response = None
-    FIREBASE_ENABLED = False
-    FIREBASE_COLLECTION = 'ai_responses'
-    _fb_firestore = None
+except Exception:
+    try:
+        from firebase_client import get_firestore_client, save_ai_response, FIREBASE_ENABLED, FIREBASE_COLLECTION
+        from firebase_admin import firestore as _fb_firestore
+    except Exception as _e:
+        logging.warning("Firebase client unavailable: %s", _e)
+        get_firestore_client = None
+        save_ai_response = None
+        FIREBASE_ENABLED = False
+        FIREBASE_COLLECTION = 'ai_responses'
+        _fb_firestore = None
 
 try:
     from google.oauth2 import id_token
@@ -647,29 +649,39 @@ def save_mcq_history(record: MCQHistoryRecord, current_user: dict | None = Depen
         record.user_email = current_user.get('user_email')
         record.user_name = current_user.get('user_name')
 
-    # Persist quiz attempt to Firebase if configured, otherwise return success
+    collection_name = FIRESTORE_HISTORY_COLLECTION or FIREBASE_COLLECTION
+    if not FIREBASE_ENABLED:
+        logging.info("Firebase not enabled — history not persisted remotely")
+        return {"status": "success", "message": "History received (not persisted - Firebase disabled).", "record": record.dict()}
+
+    if save_ai_response is None:
+        logging.error("Firebase persistence requested but save_ai_response is unavailable")
+        raise HTTPException(status_code=500, detail="Firebase support is unavailable on the server")
+
     try:
-        collection_name = FIRESTORE_HISTORY_COLLECTION or FIREBASE_COLLECTION
-        if FIREBASE_ENABLED and save_ai_response is not None:
-            save_ai_response(collection_name, record.dict())
-            return {"status": "success", "message": "History saved to Firebase.", "record": record.dict()}
-        else:
-            # Not configured: respond success but indicate local-only
-            logging.info("Firebase not enabled — history not persisted remotely")
-            return {"status": "success", "message": "History received (not persisted - Firebase disabled).", "record": record.dict()}
+        save_ai_response(collection_name, record.dict())
+        return {"status": "success", "message": "History saved to Firebase.", "record": record.dict()}
     except Exception as exc:
         logging.error("Failed to save history: %s", exc)
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail="Failed to save history to Firebase") from exc
 
 
 @app.get("/api/mcq/history")
 def list_mcq_history(limit: int = 50, current_user: dict = Depends(verify_google_token)):
     # Return persisted quiz attempts for the authenticated user, most recent first
-    if not FIREBASE_ENABLED or get_firestore_client is None:
+    if not FIREBASE_ENABLED:
+        logging.info("Firebase history requested but FIREBASE_ENABLED is false")
         return []
+
+    if get_firestore_client is None:
+        logging.error("Firebase history requested but get_firestore_client is unavailable")
+        raise HTTPException(status_code=500, detail="Firebase client is unavailable")
+
     client = get_firestore_client()
     if client is None:
-        return []
+        logging.error("Firebase history requested but Firestore client could not be initialized")
+        raise HTTPException(status_code=500, detail="Firestore client is unavailable")
+
     try:
         coll = client.collection(FIRESTORE_HISTORY_COLLECTION or FIREBASE_COLLECTION)
         query = coll.order_by('created_at', direction=_fb_firestore.Query.DESCENDING).limit(limit)
