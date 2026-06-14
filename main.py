@@ -629,7 +629,7 @@ def get_cbse_mcqs(request: CBSEMCQRequest):
     if request.num_questions < 0:
         count = len(pool)
     else:
-        count = max(1, min(request.num_questions, 50))
+        count = max(1, min(request.num_questions, len(pool)))
     random.shuffle(pool)
     selected = pool[:count]
     questions = [convert_cbse_item(item) for item in selected]
