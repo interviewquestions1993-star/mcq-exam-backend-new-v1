@@ -508,6 +508,7 @@ def get_cbse_mcqs(request: CBSEMCQRequest):
     # Attempt to fetch chapter-specific MCQs based on the topic
     entries = None
     chapter_not_found = False
+    chapter_specific_fetch = False
     if raw_query:
         chapter_name = None
         if ":" in raw_query:
@@ -525,6 +526,7 @@ def get_cbse_mcqs(request: CBSEMCQRequest):
         if chapter_name:
             try:
                 entries = fetch_cbse_mcqs(chapter_name=chapter_name)
+                chapter_specific_fetch = True
             except ChapterNotFound as exc:
                 # Chapter data not yet available
                 logging.warning("Chapter not found: %s", exc)
@@ -615,6 +617,14 @@ def get_cbse_mcqs(request: CBSEMCQRequest):
                 hay = " ".join([subject, chapter, question_text])
                 if all(tok in hay for tok in tokens):
                     filtered.append(item)
+
+    # If topic-specific filtering returns no items but the chapter-specific source was loaded,
+    # fallback to any item from that chapter to avoid false negatives on exact matching.
+    if not filtered and chapter_specific_fetch and raw_query:
+        for item in entries:
+            chapter = str(item.get("chapter", "")).lower()
+            if q_clean and q_clean in chapter:
+                filtered.append(item)
 
     if not filtered and request.topic:
         raise HTTPException(status_code=404, detail="No matching CBSE MCQs were found for this topic.")
