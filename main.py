@@ -5,6 +5,7 @@ import logging
 import traceback
 import urllib.request
 import urllib.parse
+import re
 from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException, Header, Depends
@@ -173,16 +174,9 @@ def fetch_cbse_mcqs(chapter_name: Optional[str] = None):
     global _CBSE_MCQS_CACHE
     # Build target URL
     if chapter_name:
-        # Accept either already-encoded or plain chapter names. Normalize by
-        # stripping and URL-encoding the chapter filename component.
+        # Accept either already-encoded or plain chapter names. Preserve
+        # explicit variant suffixes as they are part of the raw filename.
         name = chapter_name.strip()
-        # Do not further split on colons here; the caller provides the normalized chapter name
-        if "-" in name and "%20" not in name:
-            # if hyphen-separated, prefer last segment
-            parts = [p.strip() for p in name.split("-") if p.strip()]
-            if parts:
-                name = parts[-1]
-
         encoded = urllib.parse.quote(name, safe='')
         url = RAW_CBSE_MCQS_BASE + encoded
         logging.info(f"Constructed chapter-specific URL: {url}")
