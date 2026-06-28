@@ -254,11 +254,32 @@ def fetch_cbse_mcqs(chapter_name: Optional[str] = None):
 
 
 def convert_cbse_item(item: dict):
+    # Normalize the correct answer to uppercase letter (A, B, C, D)
+    raw_answer = item.get("answer") or item.get("correct_answer") or ""
+    normalized_answer = ""
+    if raw_answer:
+        raw_str = str(raw_answer).strip().upper()
+        # Extract first letter if it's A-D
+        match = re.match(r'^([A-D])', raw_str)
+        if match:
+            normalized_answer = match.group(1)
+        else:
+            normalized_answer = raw_str
+    
+    # Normalize options - remove "A) ", "B) ", etc. prefix if present
+    options = item.get("options", [])
+    clean_options = []
+    for opt in options:
+        opt_str = str(opt).strip()
+        # Remove "A) ", "B) ", "C) ", "D) " prefix
+        clean_opt = re.sub(r'^[A-D][\)\.\:]\s*', '', opt_str)
+        clean_options.append(clean_opt)
+    
     return {
         "id": item.get("id"),
         "question": item.get("question", ""),
-        "options": item.get("options", []),
-        "correct_answer": item.get("answer") or item.get("correct_answer") or "",
+        "options": clean_options,
+        "correct_answer": normalized_answer,
         "explanation": item.get("explanation", ""),
         "difficulty": str(item.get("difficulty", "")).capitalize() or "Medium",
     }
