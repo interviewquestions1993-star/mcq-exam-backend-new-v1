@@ -1,4 +1,4 @@
-﻿import json
+import json
 import random
 import os
 import logging
@@ -12,6 +12,24 @@ from fastapi import FastAPI, HTTPException, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from openai import OpenAI
+
+try:
+    from sentence_transformers import SentenceTransformer, util
+except ImportError:
+    SentenceTransformer = None
+    util = None
+
+sentence_model = None
+
+def ensure_sentence_model():
+    global sentence_model
+    if sentence_model is None:
+        if SentenceTransformer is None:
+            raise RuntimeError("sentence-transformers is not installed")
+        logging.info("Lazy loading SentenceTransformer model...")
+        sentence_model = SentenceTransformer('all-MiniLM-L6-v2')
+        logging.info("SentenceTransformer model loaded")
+
 from config import (
     OLLAMA_BASE_URL,
     OLLAMA_API_KEY,
@@ -63,7 +81,8 @@ allowed_origins = [
 ]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=allowed_origins,
+    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?",
+    allow_origins=["https://interviewquestions1993-star.github.io"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -146,6 +165,9 @@ class CBSEMCQRequest(BaseModel):
     topic: Optional[str] = None
     num_questions: int = 10
     difficulty: Optional[str] = None
+    chapter: Optional[str] = None
+    version: Optional[str] = "V1"
+    quiz_type: Optional[str] = "MCQ"
 
 
 class MCQHistoryRecord(BaseModel):
@@ -162,22 +184,41 @@ class MCQHistoryRecord(BaseModel):
     user_name: Optional[str] = None
 
 
+class QAEvaluateRequest(BaseModel):
+    questionId: int
+    chapter: str
+    version: str
+    userAnswer: str
+
+class QAHistoryRecord(BaseModel):
+    quizType: str = "qa"
+    chapter: str
+    version: str
+    questions: list[dict]
+    totalMarks: float
+    maximumMarks: float
+    percentage: float
+    completedAt: Optional[str] = None
+    user_id: Optional[str] = None
+    user_email: Optional[str] = None
+    user_name: Optional[str] = None
+
+
 RAW_CBSE_MCQS_BASE = "https://raw.githubusercontent.com/learnenglishandgrow93-web/cbse-mcq-bank/refs/heads/main/"
 _CBSE_MCQS_CACHE = {}
 
 
-def fetch_cbse_mcqs(chapter_name: Optional[str] = None):
-    """Fetch CBSE MCQs from GitHub raw. If chapter_name is provided, construct
+def fetch_cbse_mcqs(chapter_name: Optional[str] = None, version: str = "V1", quiz_type: str = "MCQ"):
+    """Fetch CBSE MCQs or QA from GitHub raw. If chapter_name is provided, construct
     the raw URL for that chapter file and fetch it. Caches per-URL results.
     Raises ChapterNotFound if chapter-specific URL returns 404.
     """
     global _CBSE_MCQS_CACHE
     # Build target URL
     if chapter_name:
-        # Accept either already-encoded or plain chapter names. Preserve
-        # explicit variant suffixes as they are part of the raw filename.
         name = chapter_name.strip()
-        encoded = urllib.parse.quote(name, safe='')
+        filename = f"{name}-{quiz_type.upper()}-{version.lower()}"
+        encoded = urllib.parse.quote(filename, safe='')
         url = RAW_CBSE_MCQS_BASE + encoded
         logging.info(f"Constructed chapter-specific URL: {url}")
         is_chapter_specific = True
@@ -538,30 +579,49 @@ def get_cbse_mcqs(request: CBSEMCQRequest):
     entries = None
     chapter_not_found = False
     chapter_specific_fetch = False
-    if raw_query:
+    
+    if request.chapter:
+        chapter_name = request.chapter
+        version = request.version or "V1"
+        quiz_type = request.quiz_type or "MCQ"
+    else:
         chapter_name = None
-        if ":" in raw_query:
-            # Keep everything after the first colon; chapter titles may contain colons
-            chapter_name = raw_query.split(":", 1)[1].strip()
-        elif "-" in raw_query:
-            parts = [p.strip() for p in raw_query.split("-") if p.strip()]
-            if parts:
-                chapter_name = parts[-1]
-        else:
-            # If the topic looks like a chapter title (multiple words), use it
-            if len(raw_query.split()) > 2:
-                chapter_name = raw_query
+        version = "V1"
+        quiz_type = "MCQ"
+        if raw_query:
+            if ":" in raw_query:
+                # Keep everything after the first colon; chapter titles may contain colons
+                chapter_name = raw_query.split(":", 1)[1].strip()
+            elif "-" in raw_query:
+                parts = [p.strip() for p in raw_query.split("-") if p.strip()]
+                if parts:
+                    chapter_name = parts[-1]
+            else:
+                # If the topic looks like a chapter title (multiple words), use it
+                if len(raw_query.split()) > 2:
+                    chapter_name = raw_query
+            
+            if chapter_name and re.search(r'-(MCQ|QA)-(v\d+)$', chapter_name, re.IGNORECASE):
+                match = re.search(r'-(MCQ|QA)-(v\d+)$', chapter_name, re.IGNORECASE)
+                quiz_type = match.group(1).upper()
+                version = match.group(2).upper()
+                chapter_name = chapter_name[:match.start()].strip()
+            elif chapter_name and re.search(r'-v\d+$', chapter_name, re.IGNORECASE):
+                match = re.search(r'-(v\d+)$', chapter_name, re.IGNORECASE)
+                version = match.group(1).upper()
+                chapter_name = chapter_name[:match.start()].strip()
 
-        if chapter_name:
-            try:
-                entries = fetch_cbse_mcqs(chapter_name=chapter_name)
-                chapter_specific_fetch = True
-            except ChapterNotFound as exc:
-                # Chapter data not yet available
-                logging.warning("Chapter not found: %s", exc)
-                chapter_not_found = True
-            except Exception as exc:
-                logging.warning("Failed to fetch CBSE MCQs for chapter '%s': %s", chapter_name, exc)
+
+    if chapter_name:
+        try:
+            entries = fetch_cbse_mcqs(chapter_name=chapter_name, version=version, quiz_type=quiz_type)
+            chapter_specific_fetch = True
+        except ChapterNotFound as exc:
+            # Chapter data not yet available
+            logging.warning("Chapter not found: %s", exc)
+            chapter_not_found = True
+        except Exception as exc:
+            logging.warning("Failed to fetch CBSE MCQs for chapter '%s': %s", chapter_name, exc)
 
     # If chapter was not found, return a message to the user
     if chapter_not_found:
@@ -671,7 +731,19 @@ def get_cbse_mcqs(request: CBSEMCQRequest):
         count = max(1, min(request.num_questions, len(pool)))
     random.shuffle(pool)
     selected = pool[:count]
-    questions = [convert_cbse_item(item) for item in selected]
+    
+    if quiz_type and quiz_type.upper() == "QA":
+        questions = []
+        for item in selected:
+            safe_item = item.copy()
+            safe_item.pop("answer", None)
+            safe_item.pop("correct_answer", None)
+            safe_item.pop("explanation", None)
+            safe_item.pop("evaluation", None)
+            safe_item.pop("keywords", None)
+            questions.append(safe_item)
+    else:
+        questions = [convert_cbse_item(item) for item in selected]
 
     return {
         "topic": request.topic or "CBSE",
@@ -741,7 +813,204 @@ def list_mcq_history(limit: int = 50, current_user: dict = Depends(verify_google
 def health():
     return {"status": "healthy", "message": "Ollama backend is ready"}
 
+@app.post("/api/qa/submit-answer")
+def submit_qa_answer(request: QAEvaluateRequest):
+    try:
+        entries = fetch_cbse_mcqs(chapter_name=request.chapter, version=request.version, quiz_type="QA")
+        question_data = next((q for q in entries if q.get("id") == request.questionId), None)
+        
+        if not question_data:
+            raise HTTPException(status_code=404, detail="Question not found")
+            
+        expected_answer = question_data.get("answer", "")
+        eval_data = question_data.get("evaluation", {})
+        min_similarity = eval_data.get("minimum_similarity", 0.70)
+        must_have = eval_data.get("must_have_keywords", [])
+        optional = eval_data.get("optional_keywords", [])
+        max_marks = question_data.get("marks", 1)
+        
+        ensure_sentence_model()
+        user_emb = sentence_model.encode(request.userAnswer, convert_to_tensor=True)
+        exp_emb = sentence_model.encode(expected_answer, convert_to_tensor=True)
+        sim_score = util.cos_sim(user_emb, exp_emb).item()
+        
+        user_text = request.userAnswer.lower()
+        matched_must = sum(1 for kw in must_have if kw.lower() in user_text)
+        matched_opt = sum(1 for kw in optional if kw.lower() in user_text)
+        
+        total_must = len(must_have)
+        total_opt = len(optional)
+        
+        keyword_score = 0.0
+        missing_keywords = []
+        
+        if total_must > 0 or total_opt > 0:
+            if total_must > 0:
+                must_score = matched_must / total_must
+                for kw in must_have:
+                    if kw.lower() not in user_text:
+                        missing_keywords.append(kw)
+            else:
+                must_score = 1.0
+                
+            if total_opt > 0:
+                opt_score = matched_opt / total_opt
+                for kw in optional:
+                    if kw.lower() not in user_text:
+                        missing_keywords.append(kw)
+            else:
+                opt_score = 1.0
+                
+            if total_must > 0 and total_opt > 0:
+                keyword_score = (must_score * 0.7) + (opt_score * 0.3)
+            else:
+                keyword_score = must_score if total_must > 0 else opt_score
+        else:
+            keyword_score = 1.0
+            
+        final_score = (sim_score * 0.7) + (keyword_score * 0.3)
+        
+        if final_score < min_similarity:
+            marks_awarded = 0
+            feedback = f"Your answer missed the core concepts."
+        else:
+            if final_score >= 0.95:
+                marks_awarded = max_marks
+                feedback = "Excellent! You correctly explained the main concepts."
+            else:
+                scaled = 0.5 + 0.5 * ((final_score - min_similarity) / (1.0 - min_similarity))
+                marks_awarded = round(scaled * max_marks * 2) / 2
+                feedback = "Your answer is mostly correct but could be improved by including more specific details."
+                
+        if missing_keywords:
+            feedback += " Missing concepts: " + ", ".join(missing_keywords)
+            
+        return {
+            "marksAwarded": marks_awarded,
+            "maxMarks": max_marks,
+            "similarity": round(sim_score, 2),
+            "keywordCoverage": round(keyword_score * 100),
+            "feedback": feedback,
+            "missingKeywords": missing_keywords,
+            "modelAnswer": expected_answer,
+            "explanation": question_data.get("explanation", ""),
+            "page_number": question_data.get("page_number", "")
+        }
+    except Exception as e:
+        import traceback
+        logging.error(f"Error in QA evaluate: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/qa/history")
+def save_qa_history(record: QAHistoryRecord, current_user: dict | None = Depends(verify_google_token)):
+    if current_user:
+        record.user_id = current_user.get('user_id')
+        record.user_email = current_user.get('user_email')
+        record.user_name = current_user.get('user_name')
+
+    collection_name = FIRESTORE_HISTORY_COLLECTION or FIREBASE_COLLECTION
+    if not FIREBASE_ENABLED:
+        logging.info("Firebase not enabled — history not persisted remotely")
+        return {"status": "success", "message": "History received (not persisted - Firebase disabled).", "record": record.dict()}
+
+    if save_ai_response is None:
+        raise HTTPException(status_code=500, detail="Firebase support is unavailable on the server")
+
+    try:
+        save_ai_response(collection_name, record.dict())
+        return {"status": "success", "message": "History saved to Firebase.", "record": record.dict()}
+    except Exception as exc:
+        logging.error("Failed to save history: %s", exc)
+        raise HTTPException(status_code=500, detail="Failed to save history to Firebase") from exc
+
+
+class StudyRequest(BaseModel):
+    topic: str
+    num_questions: int = -1  # -1 = all questions
+
+
+@app.post("/api/study/questions")
+def get_study_questions(request: StudyRequest):
+    """Return all QA questions WITH answers and keywords for Study Mode.
+    Reuses the same fetch_cbse_mcqs infrastructure as the QA quiz endpoint."""
+    raw_topic = request.topic or ""
+
+    # Parse chapter name and version from topic string
+    # Expected format: "CBSE Class X Subject: Chapter Name-QA-vN"
+    chapter_name: Optional[str] = None
+    version = "V1"
+
+    # Extract everything after the FIRST colon so chapter titles containing
+    # colons (e.g. "The Invisible Living World: Beyond Our Naked Eye") are preserved.
+    if ":" in raw_topic:
+        after_colon = raw_topic.split(":", 1)[1].strip()
+    else:
+        after_colon = raw_topic.strip()
+
+    # Strip type suffix: "-QA-v1" or "-Study-v1" or "-MCQ-v1"
+    match = re.search(r"-(MCQ|QA|Study)-(v\d+)$", after_colon, re.IGNORECASE)
+    if match:
+        version = match.group(2).upper()
+        chapter_name = after_colon[:match.start()].strip()
+    elif re.search(r"-v\d+$", after_colon, re.IGNORECASE):
+        vm = re.search(r"-(v\d+)$", after_colon, re.IGNORECASE)
+        version = vm.group(1).upper()
+        chapter_name = after_colon[:vm.start()].strip()
+    else:
+        chapter_name = after_colon
+
+    try:
+        entries = fetch_cbse_mcqs(chapter_name=chapter_name, version=version, quiz_type="QA")
+    except ChapterNotFound:
+        return {
+            "topic": raw_topic,
+            "num_questions": 0,
+            "questions": [],
+            "status": "chapter_not_available",
+            "message": f"Chapter '{chapter_name}' is not yet available.",
+        }
+    except Exception as exc:
+        logging.error("Study fetch failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    # Filter to only descriptive questions
+    pool = [q for q in entries if q.get("question_type", "").lower() == "descriptive" or q.get("answer")]
+
+    if request.num_questions > 0:
+        random.shuffle(pool)
+        pool = pool[:request.num_questions]
+    else:
+        # Sort by id for consistent order in study mode
+        pool = sorted(pool, key=lambda q: q.get("id", 0))
+
+    # Return ALL fields – do not strip answer, keywords or explanation
+    questions = []
+    for item in pool:
+        kw = item.get("keywords", [])
+        if isinstance(kw, str):
+            kw = [k.strip() for k in kw.split(",") if k.strip()]
+        questions.append({
+            "id": item.get("id"),
+            "question": item.get("question", ""),
+            "answer": item.get("answer", ""),
+            "difficulty": str(item.get("difficulty", "")).capitalize() or "Medium",
+            "marks": item.get("marks", 1),
+            "expected_word_count": item.get("expected_word_count"),
+            "keywords": kw,
+            "explanation": item.get("explanation", ""),
+            "page_number": item.get("page_number", ""),
+            "question_type": item.get("question_type", "descriptive"),
+        })
+
+    return {
+        "topic": raw_topic,
+        "num_questions": len(questions),
+        "questions": questions,
+        "status": "success",
+    }
+
 
 if __name__ == "__main__":
+    import uvicorn
     print(f"🚀 Starting NCERT Quiz Generator with model: {LLM_MODEL}")
     uvicorn.run(app, host="0.0.0.0", port=8000)
