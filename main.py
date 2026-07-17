@@ -78,6 +78,8 @@ allowed_origins = [
     "http://localhost:4200",
     "http://127.0.0.1:4200",
     "https://interviewquestions1993-star.github.io",
+    "https://ai-mcq-trainer.in",
+    "https://www.ai-mcq-trainer.in"
 ]
 app.add_middleware(
     CORSMiddleware,
