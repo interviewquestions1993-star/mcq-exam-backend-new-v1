@@ -6,6 +6,7 @@ import traceback
 import urllib.request
 import urllib.parse
 import re
+from difflib import SequenceMatcher
 from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException, Header, Depends
@@ -14,22 +15,24 @@ from pydantic import BaseModel
 from openai import OpenAI
 from hf_inference import hf_client
 
-try:
-    from sentence_transformers import SentenceTransformer, util
-except ImportError:
-    SentenceTransformer = None
-    util = None
 
-sentence_model = None
+def text_similarity(left: str, right: str) -> float:
+    """Lightweight similarity for optional free-text answer grading."""
+    left_normalized = " ".join(left.lower().split())
+    right_normalized = " ".join(right.lower().split())
+    if not left_normalized or not right_normalized:
+        return 0.0
 
-def ensure_sentence_model():
-    global sentence_model
-    if sentence_model is None:
-        if SentenceTransformer is None:
-            raise RuntimeError("sentence-transformers is not installed")
-        logging.info("Lazy loading SentenceTransformer model...")
-        sentence_model = SentenceTransformer('all-MiniLM-L6-v2')
-        logging.info("SentenceTransformer model loaded")
+    sequence_score = SequenceMatcher(
+        None,
+        left_normalized,
+        right_normalized,
+    ).ratio()
+    left_words = set(left_normalized.split())
+    right_words = set(right_normalized.split())
+    union = left_words | right_words
+    word_score = len(left_words & right_words) / len(union) if union else 0.0
+    return max(sequence_score, word_score)
 
 from config import (
     OLLAMA_BASE_URL,
@@ -830,7 +833,7 @@ def list_mcq_history(limit: int = 50, current_user: dict = Depends(verify_google
 
 @app.get("/health")
 def health():
-    return {"status": "healthy", "message": "Ollama backend is ready"}
+    return {"status": "healthy", "message": "NVIDIA MCQ backend is ready"}
 
 @app.post("/api/qa/submit-answer")
 def submit_qa_answer(request: QAEvaluateRequest):
@@ -848,10 +851,7 @@ def submit_qa_answer(request: QAEvaluateRequest):
         optional = eval_data.get("optional_keywords", [])
         max_marks = question_data.get("marks", 1)
         
-        ensure_sentence_model()
-        user_emb = sentence_model.encode(request.userAnswer, convert_to_tensor=True)
-        exp_emb = sentence_model.encode(expected_answer, convert_to_tensor=True)
-        sim_score = util.cos_sim(user_emb, exp_emb).item()
+        sim_score = text_similarity(request.userAnswer, expected_answer)
         
         user_text = request.userAnswer.lower()
         matched_must = sum(1 for kw in must_have if kw.lower() in user_text)
