@@ -12,6 +12,7 @@ from fastapi import FastAPI, HTTPException, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from openai import OpenAI
+from hf_inference import hf_client
 
 try:
     from sentence_transformers import SentenceTransformer, util
@@ -486,20 +487,19 @@ def get_retriever(query: str):
 @app.post("/api/mcq/generate")
 def generate_mcqs(request: MCQRequest):
     try:
-        query = f"NCERT Grade 8 {request.topic}" if request.topic else "NCERT Grade 8"
-        docs = get_retriever(query)
-        if not docs:
-            logging.warning("Retriever returned no documents for query: %s", query)
-            context = (
-                "No reference documents were found in the vector store. "
-                "Generate the MCQs using NCERT Grade 8 knowledge only."
-            )
-        else:
-            context = "\n\n".join([doc.page_content for doc in docs])
-
-        system_prompt = f"""You are an expert CBSE NCERT Grade 8 teacher with 15+ years of experience.
-Your task is to generate exactly {request.num_questions} fresh, high-quality MCQs for the topic '{request.topic}'.
-Use ONLY the provided context and NCERT-aligned concepts.
+        difficulty_hint = (
+            f"Use {request.difficulty} difficulty."
+            if request.difficulty
+            else "Use a balanced mix of difficulty levels."
+        )
+        source_hint = (
+            f"Use this source when relevant: {request.source}."
+            if request.source
+            else ""
+        )
+        prompt = f"""Generate exactly {request.num_questions} fresh, accurate multiple-choice questions about '{request.topic}'.
+{difficulty_hint}
+{source_hint}
 
 Return a valid JSON object with the following structure:
 {{
@@ -517,45 +517,62 @@ Return a valid JSON object with the following structure:
   ],
   "status": "success"
 }}
-Only return valid JSON. Do not include any extra text outside the JSON object."""
+Only return valid JSON. Do not include markdown or any extra text."""
 
-        if request.difficulty:
-            system_prompt += f"\nUse the requested difficulty level: {request.difficulty}."
-        if request.source:
-            system_prompt += f"\nUse information from this source if relevant: {request.source}."
-
-        response = client.chat.completions.create(
-            model=LLM_MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Context:\n\n{context}\n\nGenerate the JSON payload now."}
-            ],
-            temperature=0.82,
-            max_tokens=3500,
-            top_p=0.92
+        token_budget = min(1800, 300 + (request.num_questions * 250))
+        content = hf_client.text_generation(
+            prompt=prompt,
+            max_new_tokens=token_budget,
+            temperature=0.4,
+            top_p=0.9,
         )
-
-        choice = response.choices[0]
-        content = None
-
-        # OpenAI wrapper may expose the assistant text in different fields
-        if hasattr(choice, 'message') and getattr(choice, 'message', None) is not None:
-            content = getattr(choice.message, 'content', None)
-        if not content and hasattr(choice, 'text'):
-            content = getattr(choice, 'text', None)
-        if not content and hasattr(choice, 'content'):
-            content = getattr(choice, 'content', None)
-
-        logging.info('LLM raw choice content: %r', content)
-        if not content:
-            raw = None
-            try:
-                raw = choice.to_dict() if hasattr(choice, 'to_dict') else repr(choice)
-            except Exception:
-                raw = repr(choice)
-            raise RuntimeError(f"LLM response content was empty. choice={raw}")
-
         data = extract_json(content)
+
+        if isinstance(data, list):
+            data = {
+                "topic": request.topic,
+                "num_questions": len(data),
+                "questions": data,
+                "status": "success",
+            }
+
+        normalized_questions = []
+        for index, question in enumerate(
+            data.get("questions", [])[:request.num_questions],
+            start=1,
+        ):
+            raw_options = question.get("options", [])
+            if isinstance(raw_options, dict):
+                options = [
+                    f"{label}) {value}"
+                    for label, value in raw_options.items()
+                ]
+            elif isinstance(raw_options, list):
+                options = [str(option) for option in raw_options]
+            else:
+                options = []
+
+            normalized_questions.append({
+                "id": index,
+                "question": question.get("question", ""),
+                "options": options,
+                "correct_answer": question.get(
+                    "correct_answer",
+                    question.get("answer", "A"),
+                ),
+                "explanation": question.get("explanation", ""),
+                "difficulty": question.get("difficulty", "medium"),
+            })
+
+        if not normalized_questions:
+            raise ValueError("AI response contained no valid questions")
+
+        data.update({
+            "topic": request.topic,
+            "num_questions": len(normalized_questions),
+            "questions": normalized_questions,
+            "status": "success",
+        })
 
         return data
 

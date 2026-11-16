@@ -12,6 +12,19 @@ HF_TOKEN = os.getenv("HF_TOKEN", "")
 HF_MODEL = os.getenv("HF_MODEL", "deepseek-ai/DeepSeek-V4-Flash")
 HF_API_URL = "https://router.huggingface.co/v1"  # OpenAI-compatible endpoint
 
+# NVIDIA-hosted models used by the public MCQ generation endpoint.
+NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")
+NVIDIA_MODELS = [
+    model.strip()
+    for model in os.getenv(
+        "NVIDIA_MODELS",
+        "nvidia/nemotron-3.5-bolt-e4b,minimaxai/minimax-m3.1-flash",
+    ).split(",")
+    if model.strip()
+]
+NVIDIA_MODEL_TIMEOUT_SECONDS = float(os.getenv("NVIDIA_MODEL_TIMEOUT_SECONDS", "8"))
+NVIDIA_TOTAL_TIMEOUT_SECONDS = float(os.getenv("NVIDIA_TOTAL_TIMEOUT_SECONDS", "18"))
+
 # Ollama / local model configuration
 # Ollama client libraries usually add /v1 automatically, so keep the base URL at the server root.
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
