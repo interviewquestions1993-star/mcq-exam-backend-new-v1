@@ -22,8 +22,8 @@ NVIDIA_MODELS = [
     ).split(",")
     if model.strip()
 ]
-NVIDIA_MODEL_TIMEOUT_SECONDS = float(os.getenv("NVIDIA_MODEL_TIMEOUT_SECONDS", "8"))
-NVIDIA_TOTAL_TIMEOUT_SECONDS = float(os.getenv("NVIDIA_TOTAL_TIMEOUT_SECONDS", "18"))
+NVIDIA_MODEL_TIMEOUT_SECONDS = float(os.getenv("NVIDIA_MODEL_TIMEOUT_SECONDS", "20"))
+NVIDIA_TOTAL_TIMEOUT_SECONDS = float(os.getenv("NVIDIA_TOTAL_TIMEOUT_SECONDS", "45"))
 
 # Ollama / local model configuration
 # Ollama client libraries usually add /v1 automatically, so keep the base URL at the server root.

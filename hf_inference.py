@@ -60,6 +60,14 @@ class NVIDIAInference:
                     current_model,
                     attempt_timeout,
                 )
+                request_options = {}
+                if current_model == "nvidia/nemotron-3.5-bolt-e4b":
+                    # The model enables its reasoning mode by default. MCQ output
+                    # is constrained to JSON, so extra reasoning only adds latency.
+                    request_options["extra_body"] = {
+                        "chat_template_kwargs": {"enable_thinking": False}
+                    }
+
                 completion = client.chat.completions.create(
                     model=current_model,
                     messages=[{"role": "user", "content": prompt}],
@@ -68,6 +76,7 @@ class NVIDIAInference:
                     max_tokens=max_new_tokens,
                     stream=False,
                     timeout=attempt_timeout,
+                    **request_options,
                 )
 
                 if not completion.choices:
