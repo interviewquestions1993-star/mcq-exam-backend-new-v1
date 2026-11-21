@@ -33,6 +33,7 @@ class NVIDIAInference:
         max_new_tokens: int = 100,
         temperature: float = 0.7,
         top_p: float = 0.9,
+        response_format: dict | None = None,
     ) -> str:
         if not NVIDIA_API_KEY:
             raise ValueError("NVIDIA_API_KEY is not set")
@@ -67,6 +68,8 @@ class NVIDIAInference:
                     request_options["extra_body"] = {
                         "chat_template_kwargs": {"enable_thinking": False}
                     }
+                if response_format is not None:
+                    request_options["response_format"] = response_format
 
                 completion = client.chat.completions.create(
                     model=current_model,

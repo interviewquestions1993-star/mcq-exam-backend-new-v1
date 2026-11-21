@@ -522,12 +522,15 @@ Return a valid JSON object with the following structure:
 }}
 Only return valid JSON. Do not include markdown or any extra text."""
 
-        token_budget = min(1800, 300 + (request.num_questions * 250))
+        # Explanations and escaped math notation can make even short quizzes
+        # exceed a small completion budget. Leave room for the full JSON object.
+        token_budget = min(4000, 500 + (request.num_questions * 600))
         content = hf_client.text_generation(
             prompt=prompt,
             max_new_tokens=token_budget,
             temperature=0.4,
             top_p=0.9,
+            response_format={"type": "json_object"},
         )
         data = extract_json(content)
 
